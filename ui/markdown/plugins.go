@@ -132,22 +132,26 @@ func (d *Doc) Plugins(plugins ...Plugin) *Doc {
 	return d
 }
 
-func (d *Doc) parseSource(src string) []block {
+// parseSource converts one chunk. base is the chunk's byte offset inside
+// Doc.Source; the blocks it returns span absolute positions from it.
+func (d *Doc) parseSource(src string, base int) []block {
 	// Only the document's first chunk, or the whole document when parsed in
 	// one context, can start with front matter; split keeps it whole.
 	if fm, yaml, rest := splitFrontMatter(src); fm != "" && d.startsWith(src) {
-		out := []block{{kind: frontMatter, code: strings.TrimRight(yaml, "\n")}}
+		// Goldmark has no node for front matter, so its span comes from the
+		// split that found it.
+		out := []block{{kind: frontMatter, code: strings.TrimRight(yaml, "\n"), srcStart: base, srcEnd: base + len(fm)}}
 		if strings.TrimSpace(rest) != "" {
-			out = append(out, d.parseSource(rest)...)
+			out = append(out, d.parseSource(rest, base+len(fm))...)
 		}
 		return out
 	}
 	if d.plugins == nil {
-		return parse(src)
+		return parseAt(src, base)
 	}
 	source := []byte(src)
 	node := d.plugins.parser.Parse(text.NewReader(source))
-	return blocks(node, source, mathMacros{}, d.plugins)
+	return blocks(node, source, base, mathMacros{}, d.plugins)
 }
 
 func customBlock(p []*pluginSet, n ast.Node, src []byte) el.View {

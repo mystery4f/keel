@@ -1,6 +1,7 @@
 package markdown
 
 import (
+	"bytes"
 	"github.com/dyike/keel/ui/el"
 	"github.com/dyike/keel/ui/locale"
 	"strconv"
@@ -50,7 +51,9 @@ type block struct {
 	items    []listItem
 	tbl      *tableData
 
-	view any // drawing state that must survive frames (rich text, copy feedback)
+	srcStart, srcEnd int  // source bytes covered; zero when unknown
+	srcInferred      bool // span taken from the neighbours, not from goldmark
+	view             any  // drawing state that must survive frames (rich text, copy feedback)
 }
 
 type listItem struct {
@@ -88,32 +91,127 @@ type span struct {
 
 var parser = goldmark.New(goldmark.WithExtensions(extension.GFM, extension.Footnote), goldmark.WithParserOptions(gmparser.WithInlineParsers(util.Prioritized(mathInlineParser{}, 50)), gmparser.WithBlockParsers(util.Prioritized(mathBlockParser{}, 50)))).Parser()
 
-// parse turns one chunk of Markdown into blocks.
-func parse(src string) []block {
+// parse turns one chunk of Markdown into blocks at offset 0.
+func parse(src string) []block { return parseAt(src, 0) }
+
+// parseAt is parse for a chunk that starts at base, its byte offset inside
+// Doc.Source; every span it reports is measured from there.
+func parseAt(src string, base int) []block {
 	source := []byte(src)
 	doc := parser.Parse(text.NewReader(source))
-	return blocks(doc, source, mathMacros{})
+	return blocks(doc, source, base, mathMacros{})
 }
 
-func blocks(parent ast.Node, src []byte, macros mathMacros, plugins ...*pluginSet) []block {
+func blocks(parent ast.Node, src []byte, base int, macros mathMacros, plugins ...*pluginSet) []block {
 	var out []block
 	for n := parent.FirstChild(); n != nil; n = n.NextSibling() {
-		if b, ok := convert(n, src, macros, plugins...); ok {
+		if b, ok := convert(n, src, base, macros, plugins...); ok {
 			out = append(out, b)
+		}
+	}
+	// A leaf goldmark reports no lines for, such as a thematic break, takes the
+	// lines between its neighbours: the gap left by the blocks around it.
+	for i := range out {
+		if out[i].srcEnd > out[i].srcStart {
+			continue
+		}
+		start, end := 0, len(src)
+		if i > 0 {
+			start = nextLine(src, out[i-1].srcEnd-base)
+		}
+		for j := i + 1; j < len(out); j++ {
+			if out[j].srcEnd > out[j].srcStart {
+				end = lineStartAt(src, out[j].srcStart-base)
+				break
+			}
+		}
+		if end > start {
+			out[i].srcStart, out[i].srcEnd = base+start, base+end
+			out[i].srcInferred = true
 		}
 	}
 	return out
 }
 
-func convert(n ast.Node, src []byte, macros mathMacros, plugins ...*pluginSet) (block, bool) {
+// nextLine returns the start of the first line after pos.
+func nextLine(src []byte, pos int) int {
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > len(src) {
+		return len(src)
+	}
+	if i := bytes.IndexByte(src[pos:], '\n'); i >= 0 {
+		return pos + i + 1
+	}
+	return len(src)
+}
+
+// lineStartAt returns the start of the line holding pos.
+func lineStartAt(src []byte, pos int) int {
+	if pos > len(src) {
+		pos = len(src)
+	}
+	if pos < 0 {
+		return 0
+	}
+	if i := bytes.LastIndexByte(src[:pos], '\n'); i >= 0 {
+		return i + 1
+	}
+	return 0
+}
+
+func convert(n ast.Node, src []byte, base int, macros mathMacros, plugins ...*pluginSet) (block, bool) {
+	b, ok := convertInner(n, src, base, macros, plugins...)
+	if !ok {
+		return block{}, false
+	}
+	if s, e := sourceSpan(n, b, base); e > s {
+		b.srcStart, b.srcEnd = s, e
+	}
+	return b, true
+}
+
+// sourceSpan reads the line segments goldmark kept for the node; they index the
+// chunk source, so the chunk's own base turns them into Doc.Source offsets.
+// A container carries no segments: its extent is its children's.
+func sourceSpan(n ast.Node, b block, base int) (int, int) {
+	if ls := n.Lines(); ls.Len() > 0 {
+		return base + ls.At(0).Start, base + ls.At(ls.Len()-1).Stop
+	}
+	start, end, set := 0, 0, false
+	add := func(s, e int) {
+		if e <= s {
+			return
+		}
+		if !set || s < start {
+			start = s
+		}
+		if !set || e > end {
+			end = e
+		}
+		set = true
+	}
+	for _, c := range b.children {
+		add(c.srcStart, c.srcEnd)
+	}
+	for _, it := range b.items {
+		for _, c := range it.blocks {
+			add(c.srcStart, c.srcEnd)
+		}
+	}
+	return start, end
+}
+
+func convertInner(n ast.Node, src []byte, base int, macros mathMacros, plugins ...*pluginSet) (block, bool) {
 	if view := customBlock(plugins, n, src); view != nil {
 		return block{custom: view}, true
 	}
 	switch n := n.(type) {
 	case *east.FootnoteList:
-		return block{kind: footnoteList, children: blocks(n, src, macros, plugins...)}, true
+		return block{kind: footnoteList, children: blocks(n, src, base, macros, plugins...)}, true
 	case *east.Footnote:
-		children := blocks(n, src, macros, plugins...)
+		children := blocks(n, src, base, macros, plugins...)
 		anchorFirst(children, footnoteID(n.Index))
 		return block{kind: footnoteItem, level: n.Index, children: children}, true
 	case *east.FootnoteBacklink:
@@ -139,11 +237,11 @@ func convert(n ast.Node, src []byte, macros mathMacros, plugins ...*pluginSet) (
 	case *ast.CodeBlock:
 		return block{kind: codeBlock, code: lines(n, src)}, true
 	case *ast.Blockquote:
-		return block{kind: quote, children: blocks(n, src, macros, plugins...)}, true
+		return block{kind: quote, children: blocks(n, src, base, macros, plugins...)}, true
 	case *ast.List:
 		b := block{kind: list, ordered: n.IsOrdered(), start: n.Start}
 		for it := n.FirstChild(); it != nil; it = it.NextSibling() {
-			item := listItem{blocks: blocks(it, src, macros, plugins...)}
+			item := listItem{blocks: blocks(it, src, base, macros, plugins...)}
 			item.task = taskState(it)
 			b.items = append(b.items, item)
 		}

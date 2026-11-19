@@ -210,3 +210,31 @@ return selection.Decorate(cx, el.Div().Child(first.Render(cx), second.Render(cx)
 正文、标题、表格测量和代码语言标签跟随 `theme.Material.Face`，与普通控件一致；代码保留 `markdown.MonoFace`。修改字体会使文档视图缓存失效，不改变原文。
 
 流式渐显在空格前分段时，裁剪边界放在空格内部，避免换字体后切掉前一个字形超出逻辑宽度的笔画；相邻渐显片段共用同一边界。
+
+## 源码区间
+
+`Doc.SourceRanges()` 给出每个顶层块在源码中的位置，供「一块显示 Markdown、
+其余显示渲染结果」的编辑器使用：
+
+```go
+for _, r := range doc.SourceRanges() {
+	fmt.Println(r.Kind, doc.Source()[r.Start:r.End])
+}
+```
+
+`Start`、`End` 是 `Source` 的字节偏移，左闭右开，两端都落在行边界上。`Kind` 取
+`paragraph`、`heading`、`code`、`quote`、`list`、`table`、`rule`、
+`front-matter`、`group`、`custom` 之一。
+
+区间按源码顺序给出并铺满全文：每一块的起点就是上一块的终点，因此每个字节只出现
+一次，编辑器可以把每一段直接交给自己的 `New`。区间含块自身的标记，不只含内容：
+是 `# Title` 而不是 `Title`。不绘制任何内容的文本（如链接引用定义）归上一块。
+脚注列表绘制在文末附录、与源码行不在一起，因此不单独出区间，那几行留在上一块里。
+
+文档按空行切块解析，所以一个区间可能覆盖多个视觉块（一个列表是一个区间，一个
+HTML 块是一个 `group`）。区间跨 `Append` 与跨帧保持稳定；只是位置移动的块会被
+平移，不会重新解析。
+
+`Streaming` 打开时，尾部会先按临时闭合的语法解析，最后一个区间仍可能移动：
+请在流式结束后再读区间。区间来自 Goldmark 自己的行信息，所以它不当作内容的
+标记（setext 标题的下划线、表格的分隔行）可能让区间超出该块实际绘制的文字。

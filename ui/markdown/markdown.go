@@ -64,6 +64,7 @@ type Doc struct {
 type chunk struct {
 	src    string // as parsed: healed while it was the streaming tail
 	raw    string // as written
+	off    int    // raw's byte offset inside Doc.Source
 	blocks []block
 }
 
@@ -141,22 +142,48 @@ func (d *Doc) update() {
 	}
 	raws := split(d.src)
 	next := make([]chunk, len(raws))
+	base := 0
 	for i, raw := range raws {
 		src := raw
 		if d.streaming && i == len(raws)-1 {
 			src = heal(raw)
 		}
+		off := base
+		base += len(raw)
 		if i < len(d.chunks) && d.chunks[i].src == src {
-			next[i] = d.chunks[i] // unchanged: keep blocks and their drawing state
+			// Unchanged: keep the blocks and their drawing state. Their spans
+			// move only if the text before them changed length.
+			c := d.chunks[i]
+			shiftSpans(c.blocks, off-c.off)
+			c.off = off
+			next[i] = c
 			continue
 		}
-		next[i] = chunk{src: src, raw: raw, blocks: d.parseSource(src)}
+		next[i] = chunk{src: src, raw: raw, off: off, blocks: d.parseSource(src, off)}
 		if i < len(d.chunks) {
 			preserveCodeViews(d.chunks[i].blocks, next[i].blocks)
 		}
 		d.parses++
 	}
 	d.chunks = next
+}
+
+// shiftSpans moves every known source span by delta: a chunk kept its parse but
+// the text before it changed length.
+func shiftSpans(bs []block, delta int) {
+	if delta == 0 {
+		return
+	}
+	for i := range bs {
+		if bs[i].srcEnd > bs[i].srcStart {
+			bs[i].srcStart += delta
+			bs[i].srcEnd += delta
+		}
+		shiftSpans(bs[i].children, delta)
+		for _, it := range bs[i].items {
+			shiftSpans(it.blocks, delta)
+		}
+	}
 }
 
 // split cuts Markdown into top-level chunks at blank lines outside code

@@ -213,3 +213,36 @@ controls are not part of the Markdown selection.
 Body text, headings, table measurements and code labels follow `theme.Material.Face`, matching standard controls. Code retains `markdown.MonoFace`. Changing either font invalidates cached document views without changing source text.
 
 Streaming fade boundaries before a space fall inside that space, preserving the preceding glyph’s overhanging ink when the font changes. Adjacent fade spans share the same boundary.
+
+## Source ranges
+
+`Doc.SourceRanges()` reports where each top-level block sits in the source, for
+editors that show one block as Markdown and the rest as rendered text:
+
+```go
+for _, r := range doc.SourceRanges() {
+	fmt.Println(r.Kind, doc.Source()[r.Start:r.End])
+}
+```
+
+`Start` and `End` are byte offsets into `Source`; the range is half open and
+both edges sit on line boundaries. `Kind` is one of `paragraph`, `heading`,
+`code`, `quote`, `list`, `table`, `rule`, `front-matter`, `group` or `custom`.
+
+The ranges come in source order and tile the source: each one starts where the
+one before it ended, so every byte is shown exactly once and an editor can hand
+each range to its own `New`. A range covers the block's markup, not just its
+content: `# Title` rather than `Title`. Text that draws nothing, such as a link
+reference definition, belongs to the block above it. A footnote list is drawn as
+an appendix away from its source lines, so it gets no range of its own: those
+lines stay with the block above.
+
+The document parses in chunks cut at blank lines, so one range can hold several
+visual blocks (a list is one range, an HTML block is one `group`). Spans survive
+`Append` and frames; a chunk that only moved is shifted rather than reparsed.
+
+While `Streaming` is on the tail is parsed with unclosed syntax provisionally
+closed, so the last range can still move: read the ranges once streaming ends.
+The spans come from Goldmark's own line information, so a marker it does not
+treat as content (a setext heading's underline, a table's delimiter row) may
+extend a range beyond the text the block draws.

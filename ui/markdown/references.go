@@ -53,7 +53,7 @@ func (d *Doc) updateContextual() {
 	if d.contextual && d.parsedContext == src {
 		return
 	}
-	bs := d.parseSource(src)
+	bs := d.parseSource(src, 0)
 	d.parses++
 	next := make([]chunk, len(bs))
 	for i, b := range bs {
