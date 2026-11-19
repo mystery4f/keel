@@ -586,6 +586,7 @@ func (v *CodeEditorView) command(gtx core.C, e key.Event) {
 			goal = v.rowX(c)
 		}
 		prim := v.prim
+		before := v.primary().caret
 		for i, s := range v.sels {
 			x := v.rowX(s.caret)
 			if i == prim {
@@ -615,6 +616,10 @@ func (v *CodeEditorView) command(gtx core.C, e key.Event) {
 		}
 		v.normalize()
 		v.reveal, v.goalX = true, goal
+		if (e.Name == key.NameUpArrow || e.Name == key.NameDownArrow) && !shift && !shortcut &&
+			len(v.sels) == 1 && v.primary().caret == before && v.onBoundary != nil {
+			core.Call(gtx, func() { v.onBoundary(rows) })
+		}
 	case key.NameHome:
 		v.moveAll(shift, func(s codeSel) codePos {
 			if shortcut {

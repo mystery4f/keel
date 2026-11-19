@@ -308,3 +308,33 @@ func TestCodeEditorDefinitionWhitespaceAndTabs(t *testing.T) {
 		t.Fatalf("tab stop is 2 spaces wide: %v", x)
 	}
 }
+
+func TestCodeEditorBoundaryKeys(t *testing.T) {
+	ed, h := focusedEditor("one\ntwo")
+	var dirs []int
+	ed.OnBoundary(func(dir int) { dirs = append(dirs, dir) })
+	ed.SetCursor(1, 1)
+	h.Frame()
+	h.Key(key.NameDownArrow, 0)
+	if len(dirs) != 1 || dirs[0] != 1 {
+		t.Fatalf("down on the last row reports 1: %v", dirs)
+	}
+	if l, _ := ed.Cursor(); l != 1 {
+		t.Fatalf("the caret stays on the last row: %d", l)
+	}
+	// Moving inside the content reports nothing.
+	h.Key(key.NameUpArrow, 0)
+	if len(dirs) != 1 {
+		t.Fatalf("up within the text reports nothing: %v", dirs)
+	}
+	h.Key(key.NameUpArrow, 0)
+	if len(dirs) != 2 || dirs[1] != -1 {
+		t.Fatalf("up on the first row reports -1: %v", dirs)
+	}
+	// Selection and shortcut variants belong to the editor.
+	h.Key(key.NameUpArrow, key.ModShift)
+	h.Key(key.NameUpArrow, key.ModShortcut)
+	if len(dirs) != 2 {
+		t.Fatalf("shift and shortcut up do not report: %v", dirs)
+	}
+}

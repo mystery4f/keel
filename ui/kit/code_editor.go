@@ -87,6 +87,7 @@ type CodeEditorView struct {
 	onHover           func(line, col int) string
 	onDefinition      func(line, col int)
 	onLineNumberPress func(int)
+	onBoundary        func(dir int)
 	diagnostics       []CodeDiagnostic
 	decorations       []*CodeDecorationCollection
 
@@ -241,6 +242,15 @@ func (v *CodeEditorView) OnDefinition(fn func(line, col int)) *CodeEditorView {
 // pressed. Fold-arrow presses remain folding operations; line selection remains.
 func (v *CodeEditorView) OnLineNumberPress(fn func(int)) *CodeEditorView {
 	v.onLineNumberPress = fn
+	return v
+}
+
+// OnBoundary reports an up or down arrow that could not move the caret because
+// it sits on the first (-1) or last (1) visible row. The editor keeps its
+// content; the caller moves focus, e.g. to the next block of a document split
+// into per-block editors. Shift and shortcut variants never report.
+func (v *CodeEditorView) OnBoundary(fn func(dir int)) *CodeEditorView {
+	v.onBoundary = fn
 	return v
 }
 
