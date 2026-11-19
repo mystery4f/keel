@@ -44,40 +44,26 @@ type SourceRange struct {
 func (d *Doc) SourceRanges() []SourceRange {
 	src := d.src
 	docEnd := len(strings.TrimRight(src, "\n"))
-	type entry struct {
-		b block
-	}
-	var entries []entry
-	for _, c := range d.chunks {
-		for _, b := range c.blocks {
-			if k := b.kind; k == footnoteList || k == footnoteItem {
-				continue // drawn as an appendix, away from its source lines
-			}
-			entries = append(entries, entry{b: b})
-		}
-	}
-	// The contextual parser splits the document by node, not by position, so
-	// footnote lists can arrive last while sitting mid-document: sort by source.
-	sort.SliceStable(entries, func(i, j int) bool { return entries[i].b.srcStart < entries[j].b.srcStart })
+	entries := d.sourceOrderedBlocks()
 	var out []SourceRange
 	prev := 0
 	for i, e := range entries {
 		// A block's own source begins at its open offset, which carries the
 		// markers: "# " for an ATX heading, the fence line above a fenced code
 		// block's first content line.
-		start := e.b.open
+		start := e.open
 		// Ranges tile the source in order and never overlap: text between two
 		// blocks belongs to the block above, and a block goldmark reports no
 		// lines for keeps the lines its neighbours left free.
 		if start < prev {
 			start = prev
 		}
-		end := e.b.srcEnd // a line boundary already when inferred
-		if !e.b.srcInferred {
-			end = lineEndOf(src, e.b.srcEnd)
+		end := e.srcEnd // a line boundary already when inferred
+		if !e.srcInferred {
+			end = lineEndOf(src, e.srcEnd)
 		}
 		if i+1 < len(entries) {
-			next := entries[i+1].b
+			next := entries[i+1]
 			// The next block's own source starts here, markers included, so the
 			// gap before it belongs to the block above. A block goldmark reports
 			// no lines for has no open offset: its content line is the boundary.
@@ -92,7 +78,7 @@ func (d *Doc) SourceRanges() []SourceRange {
 		if end <= start || start >= len(src) {
 			continue
 		}
-		out = append(out, SourceRange{Kind: e.b.sourceKind(), Start: start, End: end})
+		out = append(out, SourceRange{Kind: e.kind, Start: start, End: end})
 		prev = end
 	}
 	return out
@@ -111,6 +97,33 @@ func lineStartOf(src string, pos int) int {
 		return i + 1
 	}
 	return 0
+}
+
+// sourceOrderedBlocks returns every top-level interested block in source
+// order. The contextual parser splits by node, not by position, so footnote
+// lists can arrive last while sitting mid-document: sort by source.
+func (d *Doc) sourceOrderedBlocks() []bmg {
+	var list []bmg
+	for _, c := range d.chunks {
+		for _, b := range c.blocks {
+			if k := b.kind; k == footnoteList || k == footnoteItem {
+				continue // drawn as an appendix, away from its source lines
+			}
+			list = append(list, bmg{kind: b.sourceKind(), open: b.open, srcStart: b.srcStart, srcEnd: b.srcEnd, srcInferred: b.srcInferred})
+		}
+	}
+	sort.SliceStable(list, func(i, j int) bool { return list[i].srcStart < list[j].srcStart })
+	return list
+}
+
+// bmg couples a block with the source offsets SourceRanges needs. It is
+// built per call so the exporter reads only these fields, never raw blocks.
+type bmg struct {
+	kind        string
+	open        int
+	srcStart    int
+	srcEnd      int
+	srcInferred bool
 }
 
 func (b block) sourceKind() string {
