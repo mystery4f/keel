@@ -241,3 +241,42 @@ HTML 块是一个 `group`）。区间跨 `Append` 与跨帧保持稳定；只是
 `Streaming` 打开时，尾部会先按临时闭合的语法解析，最后一个区间仍可能移动：
 请在流式结束后再读区间。区间来自 Goldmark 自己的行信息，所以它不当作内容的
 标记（setext 标题的下划线、表格的分隔行）可能让区间超出该块实际绘制的文字。
+
+## 行内区间
+
+`Doc.SourceSpans(i)` 再往下一层：给出 `SourceRanges` 第 `i` 块里每个被绘制的行内
+片段，以及它来自哪段 Markdown，按绘制顺序排列。
+
+```go
+ranges := doc.SourceRanges()
+for k, s := range doc.SourceSpans(3) {
+	fmt.Println(s.Kind, doc.Source()[s.Start:s.End], doc.SpanEditable(3, k))
+}
+```
+
+`Kind` 取 `text`、`emph`、`strong`、`strike`、`code`、`link`、`image`、
+`math`、`footnote-ref`、`html`、`object` 之一。区间含自身的标记：`**粗体**`
+而不是 `粗体`，链接保留 `[文字](目标)`。嵌套片段会重叠：`*a **b** c*` 里强调覆
+盖整行，加粗覆盖 `**b**`。
+
+`Synthetic` 表示「画出来了但没有可指的源码区间」，例如脚注角标；这类片段不要去
+编辑。只有段落和标题有行内区间——代码块、表格、引用、列表一律返回空，编辑器对它
+们整块处理。
+
+`SpanEditable(i, k)` 说明片段 `k` 能否单独交给一个控件：把它的 Markdown 连同本
+文档的链接引用与脚注定义重新解析，渲染文本必须一致。跨行片段、`Synthetic` 片段
+和纯空白一律为 false。
+
+`OnSpanClick` 报告读者点中了哪个片段，供「把一个片段换成输入框」的编辑器使用：
+
+```go
+doc.OnSpanClick(func(block, span int) {
+	if doc.SpanEditable(block, span) {
+		start := doc.SourceRanges()[block].Start
+		fmt.Println(doc.SourceSpans(block)[span].Kind, start)
+	}
+})
+```
+
+`block` 是 `SourceRanges` 的下标，`span` 是 `SourceSpans(block)` 的下标。拖动选
+区的点击不会上报，复制文字照旧可用。

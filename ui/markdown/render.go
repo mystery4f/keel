@@ -323,6 +323,17 @@ func (d *Doc) rich(b *block, spans []span, size unit.Sp, bold bool, c color.NRGB
 	}
 	r.anchor = b.anchor
 	r.caret = withCaret
+	// A paragraph reports which of its inline spans was clicked; the click
+	// runs paint-first, so the block index is resolved then.
+	r.onSpan = nil
+	if d.onSpanClick != nil && len(b.srcl) > 0 {
+		r.onSpan = func(k int) {
+			if i := d.blockIndex(b); i >= 0 {
+				d.onSpanClick(i, k)
+			}
+		}
+	}
+	r.rt.srcl = b.srcl
 	return r
 }
 
@@ -340,6 +351,7 @@ type richBlock struct {
 	links         bool
 	rt            richText
 	onLink        func(string)
+	onSpan        func(span int)
 	imageRevision uint64
 	anchor        string // internal navigation destination
 	separator     string // plain-text boundary before this block; default: blank line

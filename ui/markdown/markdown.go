@@ -47,6 +47,8 @@ type Doc struct {
 	streaming         bool
 	chunks            []chunk
 	onLink            func(url string)
+	onSpanClick       func(block, span int)
+	defs, defsSrc     string
 	selection         documentSelection
 	selectionGroup    *SelectionGroup
 	contextual        bool
