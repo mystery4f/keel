@@ -1,0 +1,515 @@
+package window
+
+import (
+	"fmt"
+	"image"
+	"log"
+	"math"
+	"os"
+	"sync"
+	"sync/atomic"
+	"time"
+	"unsafe"
+
+	gioapp "github.com/dyike/keel/gio/app"
+	"github.com/dyike/keel/gio/io/system"
+	"github.com/dyike/keel/gio/layout"
+	"github.com/dyike/keel/gio/op"
+	"github.com/dyike/keel/gio/unit"
+	"github.com/dyike/keel/gio/widget"
+
+	"github.com/dyike/keel/ui/core"
+	"github.com/dyike/keel/ui/internal/loop"
+)
+
+// TrafficLightLayout positions macOS's standard window buttons in dp.
+// Buttons retain their system size, rendering and native behavior.
+// Height is the custom titlebar height; buttons are centered vertically in it.
+// Left is the first button's left inset. OffsetY moves the center down (or up
+// when negative). Spacing is the distance between button centers; zero keeps
+// AppKit's spacing. A nil layout in Options keeps AppKit's default placement.
+type TrafficLightLayout struct {
+	Height, Left, OffsetY, Spacing float32
+}
+
+// MenuDisplay selects how an installed application menu is shown in this window.
+type MenuDisplay uint8
+
+const (
+	MenuDisplayAuto   MenuDisplay = iota // AppKit/Win32 menus; in-window on Linux and frameless Windows.
+	MenuDisplayWindow                    // Keel-drawn menu; useful for custom title bars and testing.
+	MenuDisplayHidden                    // Application provides its own renderer; shortcuts remain available.
+)
+
+// Options configures a window. Width and Height are in dp; zero uses 640×480.
+type Options struct {
+	// CustomBrowserHistory lets a browser application own URL/back navigation.
+	// Set when opening the window. It has no effect on native windows.
+	CustomBrowserHistory bool
+	// TextScale overrides font scaling relative to dp. Zero follows the platform;
+	// 1 uses design sizes. It does not change window, icon or spacing dimensions.
+	TextScale float32
+	// AutoSize uses a comfortable portion of compositor-provided bounds on the
+	// first launch. Without bounds it keeps Width/Height (or 960x640).
+	AutoSize bool
+	// SizeState restores/saves the normal client size. Load it before Open.
+	SizeState     *SizeState
+	MenuDisplay   MenuDisplay
+	Title         string
+	Width, Height int
+	// MinWidth and MinHeight constrain the client area in dp; zero leaves an axis unconstrained.
+	MinWidth, MinHeight int
+	Content             core.Widget
+	// Overlay is drawn over the whole window, above Content, for hand-written
+	// Gio content; el views declare overlays with cx.Overlay instead. It should
+	// take no space while it has nothing to show.
+	Overlay core.Widget
+	// Shortcuts maps accelerators to callbacks while the window has focus, e.g.
+	// "mod+," (Cmd on macOS, Ctrl elsewhere), "ctrl+shift+s", "esc".
+	Shortcuts map[string]func()
+	OnClose   func()
+	// OnResize receives the actual client-area size in dp, on the first frame
+	// and when it changes. It runs on the UI update queue.
+	OnResize func(width, height int)
+	// Frameless hides the system title bar so the content can draw its own,
+	// e.g. a kit.TitleBar; the content then starts at the window's top edge.
+	Frameless bool
+	// TopMost keeps the window above ordinary application windows. It does not
+	// activate the application; use Raise when opening a resident launcher.
+	TopMost bool
+	// NativeTrafficLights keeps AppKit's standard window buttons visible over
+	// frameless content on macOS. Reserve the top-left titlebar area in Content.
+	// Other platforms ignore this option.
+	NativeTrafficLights bool
+	TrafficLightLayout  *TrafficLightLayout
+	// Glass enables a native macOS glass backdrop. Leave the desired glass
+	// areas transparent in Content. Other platforms keep the theme background.
+	Glass *GlassOptions
+	// KeepState points to application state that survives keel run's reloads,
+	// such as the current page or a counter: it is encoded with encoding/json
+	// before a reload and decoded into the same pointer by Open after it, so
+	// only exported fields count. Without keel run it is unused. Window size,
+	// scroll offsets and input text are kept without it.
+	KeepState any
+}
+
+type Window struct {
+	initialSizeApplied        bool
+	normalMode                bool
+	closeRequested            atomic.Bool
+	actionMu                  sync.Mutex
+	resizeVersion             atomic.Uint64
+	resizeSerial              sync.Mutex
+	size                      atomic.Uint64
+	lastSize                  image.Point
+	win                       *gioapp.Window // nil in automation mode
+	virt                      *virtual       // non-nil in automation mode
+	opts                      Options
+	shortcuts                 []shortcut
+	menuView                  applicationMenuView
+	menuEdits                 []core.EditAction
+	root                      root
+	closed                    bool        // guarded by the frame lock
+	reloadID                  string      // names the window's state across keel run reloads
+	reloadOrigin              *[2]float64 // macOS frame origin to restore instead of centering
+	focused                   bool
+	nativeTrafficLightsDirty  bool
+	nativeView, lastTitleView uintptr
+	x11Window                 uint32               // the X11 window ID on Linux X11, for Activate
+	waylandDisplay            atomic.Pointer[byte] // the window's wl_display on Linux Wayland
+	waylandSurface            atomic.Pointer[byte] // its wl_surface, for Activate
+	titleArea, lastTitleArea  [4]float32
+	maximized                 bool // guarded by the frame lock; from the platform's config
+	deco                      widget.Decorations
+	drawsTitle                bool          // Keel draws the title bar; see decorations.go
+	shown                     chan struct{} // closed at the first frame or at destruction
+	glassRenderer             glassRenderer
+	// axActive is set once a platform accessibility client asked about the
+	// window; axQueued while a refresh of its elements waits.
+	axActive, axQueued atomic.Bool
+}
+
+// Open creates and shows a centered window where the platform supports it.
+// Call it before Main or from any callback.
+// It panics on an invalid shortcut, which is a programming error.
+func Open(o Options) *Window {
+	w := newWindow(o)
+	if os.Getenv("KEEL_RUN_WATCH") == "1" {
+		restoreWindow(w)
+	}
+	registerDevelopmentWindow(w)
+	registerApplicationWindow(w)
+	loadRunIcon()
+	if offScreen() {
+		openVirtual(w, true)
+		return w
+	}
+	w.win = new(gioapp.Window)
+	w.win.Option(w.nativeOptions()...)
+	loop.Register(w, w.win.Invalidate)
+	accessibilityOpen(w)
+	if automating() {
+		openVirtual(w, false) // shadow of the real window, driven by agents
+	}
+	go w.run()
+	return w
+}
+
+func newWindow(o Options) *Window {
+	if o.TextScale < 0 || math.IsNaN(float64(o.TextScale)) || math.IsInf(float64(o.TextScale), 0) {
+		panic("window: invalid text scale")
+	}
+	if o.Glass != nil {
+		glass := *o.Glass
+		glass.validate()
+		o.Glass = &glass
+	}
+	if o.MinWidth < 0 || o.MinHeight < 0 || uint64(o.MinWidth) > 2147483647 || uint64(o.MinHeight) > 2147483647 {
+		panic("window: invalid minimum size")
+	}
+	if o.TrafficLightLayout != nil {
+		layout := *o.TrafficLightLayout
+		o.TrafficLightLayout = &layout
+	}
+	if saved := o.SizeState.snapshot(); saved.X > 0 && saved.Y > 0 {
+		o.Width, o.Height = saved.X, saved.Y
+		o.AutoSize = false
+	}
+	if o.AutoSize {
+		if o.Width == 0 {
+			o.Width = 960
+		}
+		if o.Height == 0 {
+			o.Height = 640
+		}
+	}
+	if o.Width == 0 {
+		o.Width = 640
+	}
+	if o.Height == 0 {
+		o.Height = 480
+	}
+	o.Width = max(o.Width, o.MinWidth)
+	o.Height = max(o.Height, o.MinHeight)
+	w := &Window{normalMode: true, opts: o, focused: true, shortcuts: mustParseShortcuts(o.Shortcuts), shown: make(chan struct{})}
+	w.storeSize(o.Width, o.Height)
+	return w
+}
+
+func (w *Window) nativeOptions() []gioapp.Option {
+	o := w.opts
+	options := []gioapp.Option{gioapp.Title(o.Title), gioapp.Size(unit.Dp(o.Width), unit.Dp(o.Height)), gioapp.Decorated(askDecorations(o.Frameless))}
+	if o.CustomBrowserHistory {
+		options = append(options, gioapp.CustomBrowserHistory(true))
+	}
+	if o.TopMost {
+		options = append(options, gioapp.TopMost(true))
+	}
+	if w.opts.Glass != nil && GlassSupported() {
+		options = append(options, gioapp.CustomRenderer(true))
+	}
+	if o.MinWidth > 0 || o.MinHeight > 0 {
+		options = append(options, gioapp.MinSize(unit.Dp(max(1, o.MinWidth)), unit.Dp(max(1, o.MinHeight))))
+	}
+	return options
+}
+
+// SetTrafficLightLayout updates native button placement without recreating
+// the window. It is safe from callbacks or background goroutines; the change
+// is applied on the next frame. NativeTrafficLights must be enabled in Options.
+func (w *Window) SetTrafficLightLayout(layout TrafficLightLayout) {
+	core.Update(func() {
+		if !w.closed {
+			w.opts.TrafficLightLayout = &layout
+			w.nativeTrafficLightsDirty = true
+		}
+	})
+}
+
+// Main runs the platform event loop. The process exits after the last window
+// closes. With KEEL_AUTOMATION set it also serves automation requests, or only
+// those with KEEL_HEADLESS=1; see automation.go.
+func Main() { MainWithOptions(MainOptions{}) }
+
+// MainWithOptions runs the event loop, optionally keeping a windowless app alive.
+// Configure it once on the main goroutine.
+func MainWithOptions(options MainOptions) {
+	configureApplication(options)
+	if offScreen() {
+		serveAutomation()
+		return
+	}
+	if automating() {
+		go serveAutomation()
+	}
+	if os.Getenv("REX_STARTUP_TRACE") != "" {
+		fmt.Fprintf(os.Stderr, "keel %d Main\n", time.Now().UnixMicro())
+	}
+	watchSystemPreferences()
+	if os.Getenv("REX_STARTUP_TRACE") != "" {
+		fmt.Fprintf(os.Stderr, "keel %d gioapp.Main\n", time.Now().UnixMicro())
+	}
+	gioapp.Main()
+}
+
+// Close closes the window as if the user clicked its close button.
+func (w *Window) Close() {
+	if w.closeRequested.CompareAndSwap(false, true) {
+		w.perform(system.ActionClose)
+	}
+}
+
+// Raise brings the window to the front.
+func (w *Window) Raise() { w.perform(system.ActionRaise) }
+
+// WaylandDisplay is this window's wl_display on Linux Wayland, nil elsewhere
+// or before the window is shown. Pass it to native/clipboard's
+// UseWaylandDisplay to read the clipboard while this window has focus.
+func (w *Window) WaylandDisplay() unsafe.Pointer { return unsafe.Pointer(w.waylandDisplay.Load()) }
+
+// Activate brings the window to the front with an activation token that
+// another program granted, such as notification.Activation.Token after a
+// system notification was clicked. Window managers let a token through
+// their focus-stealing prevention, where a plain Raise may only flash the
+// taskbar. On Wayland the token goes to xdg-activation; on X11 it is a
+// startup ID. Elsewhere, with an empty token, or if the platform refuses,
+// Activate is Raise.
+func (w *Window) Activate(token string) {
+	if token == "" || w.win == nil || !platformActivate(w, token) {
+		w.Raise()
+	}
+}
+
+// Minimize hides the window in the Dock or taskbar.
+func (w *Window) Minimize() { w.perform(system.ActionMinimize) }
+
+// ToggleMaximize maximizes the window (zooms it on macOS), or restores it
+// when it is maximized.
+func (w *Window) ToggleMaximize() {
+	if w.win == nil { // headless: track the state so tests and agents see it
+		w.maximized = !w.maximized
+		return
+	}
+	if w.maximized {
+		w.perform(system.ActionUnmaximize)
+	} else {
+		w.perform(system.ActionMaximize)
+	}
+}
+
+// Maximized reports whether the window is maximized. Call it from UI code.
+func (w *Window) Maximized() bool { return w.maximized }
+
+// Frameless reports whether the window draws its own title bar.
+func (w *Window) Frameless() bool { return w.opts.Frameless }
+func (w *Window) Focused() bool   { return w.focused }
+func (w *Window) TitleBarArea(x, y, width, height float32) {
+	if w.opts.Frameless {
+		w.titleArea = [4]float32{x, y, width, height}
+	}
+}
+func (w *Window) setFocused(focused bool) {
+	if w.focused != focused {
+		w.focused = focused
+		if w.win != nil {
+			loop.Changed()
+			w.win.Invalidate()
+		}
+	}
+}
+
+// perform must not block: callers hold the frame lock, while Gio's Perform
+// waits for the main thread, which may be waiting for another window's frame,
+// which waits for the frame lock. So it runs after the caller returns.
+//
+// It also waits for the window's first frame: Gio v0.10.3 on macOS crashes if
+// a window is closed before its native window is fully created (it cascades
+// the position of the already released NSWindow). An agent easily closes a
+// window within milliseconds of opening it.
+func (w *Window) perform(a system.Action) {
+	if a != system.ActionClose && w.closeRequested.Load() {
+		return
+	}
+	if w.win == nil { // headless automation
+		queueAction(w, a)
+		return
+	}
+	go func() {
+		<-w.shown
+		// A queued Raise must not reopen a native window after Close. Both
+		// actions can be waiting for the same first frame of a new window.
+		w.actionMu.Lock()
+		defer w.actionMu.Unlock()
+		if a != system.ActionClose && w.closeRequested.Load() {
+			return
+		}
+		if !w.isClosed() {
+			if os.Getenv("REX_STARTUP_TRACE") != "" {
+				fmt.Fprintf(os.Stderr, "keel %d window=%q action=%v\n", time.Now().UnixMicro(), w.opts.Title, a)
+			}
+			w.win.Perform(a)
+		}
+	}()
+}
+
+func (w *Window) isClosed() bool {
+	loop.Lock()
+	defer loop.Unlock()
+	return w.closed
+}
+
+// Closed reports whether the window has been destroyed. Call it from UI code.
+func (w *Window) Closed() bool { return w.closed }
+
+func (w *Window) run() {
+	var ops op.Ops
+	positioned := false
+	for {
+		ev := w.win.Event()
+		if os.Getenv("REX_STARTUP_TRACE") != "" {
+			fmt.Fprintf(os.Stderr, "keel %d window=%q event %T\n", time.Now().UnixMicro(), w.opts.Title, ev)
+		}
+		switch e := ev.(type) {
+		case gioapp.DestroyEvent:
+			w.markShown()
+			w.destroy()
+			return
+		case gioapp.ConfigEvent:
+			if !w.initialSizeApplied && e.Config.Bounds.X > 0 && e.Config.Bounds.Y > 0 {
+				w.initialSizeApplied = true
+				size := initialWindowSize(image.Pt(w.opts.Width, w.opts.Height), e.Config.Bounds, w.opts.AutoSize)
+				if size != image.Pt(w.opts.Width, w.opts.Height) {
+					_ = w.Resize(size.X, size.Y)
+				}
+			}
+			loop.Lock()
+			w.normalMode = e.Config.Mode == gioapp.Windowed
+			w.nativeTrafficLightsDirty = true
+			w.setFocused(e.Config.Focused)
+			if m := e.Config.Mode == gioapp.Maximized; m != w.maximized {
+				w.maximized = m
+				loop.Changed()
+				w.win.Invalidate() // title bars show maximize or restore
+			}
+			if w.updateDecorations(e.Config.Decorated, e.Config.Mode == gioapp.Fullscreen) {
+				loop.Changed()
+				w.win.Invalidate()
+			}
+			loop.Unlock()
+			accessibilityFocus(w, e.Config.Focused)
+		case gioapp.FrameEvent:
+			stats := beginFrameStats()
+			gtx := gioapp.NewContext(&ops, e)
+			if w.virt != nil { // keep the shadow the same size as the window
+				w.virt.setSize(image.Pt(int(e.Metric.PxToDp(e.Size.X)), int(e.Metric.PxToDp(e.Size.Y))))
+			}
+			loop.Lock()
+			loop.Drain()
+			w.layout(gtx)
+			loop.Unlock()
+			stats.layoutDone()
+			if w.glassRenderer != nil {
+				if err := w.glassRenderer.Frame(gtx.Ops, e.Size); err != nil {
+					log.Printf("window: glass rendering: %v", err)
+					w.Close()
+				}
+			}
+			e.Frame(gtx.Ops)
+			accessibilityFrame(w, e.Size)
+			stats.end()
+			if !positioned {
+				positioned = true
+				loop.Lock()
+				centerNewWindow(w)
+				loop.Unlock()
+			}
+			w.markShown()
+		default:
+			// A window nobody can see (minimized, covered, screen locked)
+			// draws no frames but still wakes up on Invalidate. Run queued
+			// updates then, or they would wait until some window shows.
+			if loop.Pending() {
+				loop.Lock()
+				loop.Drain()
+				loop.Unlock()
+			}
+			platformWindowEvent(w, e)
+			platformGlassEvent(w, e)
+			iconWindowEvent(w, e)
+			applicationMenuWindowEvent(w, e)
+		}
+	}
+}
+
+func (w *Window) layout(gtx core.C) {
+	if w.opts.TextScale > 0 {
+		density := gtx.Metric.PxPerDp
+		if density == 0 {
+			density = 1
+		}
+		gtx.Metric.PxPerSp = density * w.opts.TextScale
+	}
+	defer core.SetCurrentWindow(w)()
+	w.observeSize(gtx)
+	w.titleArea = [4]float32{}
+	defer func() { syncTitleBar(w) }()
+	w.handleShortcuts(gtx)
+	gtx, below := w.belowTitleBar(gtx)
+	defer below()
+	gtx, menuBelow := w.belowApplicationMenu(gtx)
+	defer menuBelow()
+	defer func() { w.menuEdits = nil }()
+	w.root.transparent = w.opts.Glass != nil && GlassSupported() && !offScreen()
+	w.root.Layout(gtx, w.opts.Content)
+	if w.opts.Overlay != nil {
+		o := gtx
+		o.Constraints = layout.Exact(gtx.Constraints.Max)
+		w.opts.Overlay.Layout(o)
+	}
+}
+
+func (w *Window) destroy() {
+	accessibilityClose(w)
+	remaining := w.finish()
+	if w.virt != nil {
+		forgetVirtual(w)
+	}
+	if remaining == 0 && !application.keepAlive.Load() {
+		if automating() {
+			// Give the automation server time to answer the request that
+			// closed the window, and AppKit time to finish tearing it down.
+			time.AfterFunc(500*time.Millisecond, func() { os.Remove(auto.addr); Quit() })
+			return
+		}
+		Quit()
+	}
+}
+
+// finish marks the window closed, runs OnClose and reports how many windows remain.
+func (w *Window) finish() int {
+	if w.glassRenderer != nil {
+		w.glassRenderer.Release()
+		w.glassRenderer = nil
+	}
+	loop.Lock()
+	w.closed = true
+	clearPlatformWindow(w)
+	if callback := w.opts.OnClose; callback != nil {
+		w.opts.OnClose = nil
+		callback()
+	}
+	unregisterDevelopmentWindow(w)
+	unregisterApplicationWindow(w)
+	remaining := loop.Unregister(w)
+	loop.Unlock()
+	w.saveSizeState()
+	return remaining
+}
+
+func (w *Window) markShown() {
+	select {
+	case <-w.shown:
+	default:
+		close(w.shown)
+	}
+}

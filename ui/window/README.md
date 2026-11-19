@@ -1,0 +1,104 @@
+# ui/window
+
+English | [简体中文](README.zh-CN.md)
+
+Window: open, close, bring to front (including activation token), window shortcut keys, event loop, off-screen screenshots, as well as read system preferences and complete platform events that Gio does not have.
+
+| File | Responsibility |
+| --- | --- |
+| `window.go` | `Open`, `Main`, `Options` (including `Overlay`), `Window` (`Raise`, `Activate`, `WaylandDisplay`…) |
+| `memory.go` | Opt-in process-wide idle Go heap reclamation |
+| `shortcut.go` | Shortcut key analysis and distribution |
+| `icon*.go` | `SetIcon`: The runtime application icon (macOS Dock, Windows window, X11 `_NET_WM_ICON`), the shape is cut out by `internal/appicon` according to the platform specification |
+| `root.go` | Window root view: background, scroll, 24dp margins |
+| `glass*` | Opt-in macOS glass backdrop, transparent Metal rendering and platform fallback; see [usage](../../docs/app.md#macos-glass-backdrop) |
+| `position_*` | First display centered; macOS calculated based on available screen area, other platforms use Gio actions |
+| `screenshot.go` | `Screenshot` Off-screen rendering to PNG |
+| `decorations*.go` | Linux compositor is drawn by Keel when not drawing title bar |
+| `titlebar_darwin.*` | Title bar drag area of macOS borderless window |
+| `scene_ios.*` | Experimental iOS scene lifecycle adapter, selected by `KeelSceneDelegate` in Info.plist; see [iOS simulator](../../docs/ios.md) |
+| `activation_*` | `Activate(token)`: Wayland uses xdg-activation, X11 writes the startup ID and then requests activation |
+| `motion_*` | System preferences: reduce dynamic effects (macOS), scrollbar auto-hide (macOS, Windows), write in `theme` |
+| `motion_darwin.go` (macOS), `scroll_wayland*` | The device and gesture stages of scrolling (trackpad hand lift, scroll wheel) are not provided by Gio and are left to `core.ReportScrollGesture` |
+| `automation.go` | Automation mode: memory window, semantic snapshot, simulated click input scrolling |
+| `reload*.go`, `development.go` | `keel run` reloads: save and restore window size, macOS position, `KeepState` and the content's `core.ReloadState` |
+| `headless.go` | `OpenHeadless`: the in-memory window for application tests; `windowtest` wraps it for `testing.TB` |
+| `automation_server.go` | Automation protocol: JSON request on `KEEL_AUTOMATION` socket |
+| `testdata/raise` | Real window deadlock regression testing |
+
+- **Dependencies**: `core`, `theme`, `internal/appicon` (icon shape, shared with scaffolding), `ui/internal/appkit` (AppKit through purego, macOS only, no cgo), and `jezek/xgb` (X11 activation) and libwayland-client on Linux, reached through `ui/internal/wayland` (purego, no cgo) on the connection Gio opened. Does not rely on `el`, `kit`: the window only recognizes the `core.Widget` interface, and the system preferences are handed over to el through `theme`.
+- **Used by**: Application code. `cmd/keel-mcp` drives it through the socket protocol and does not reference its code.
+
+When the environment variable `KEEL_AUTOMATION=1` (or socket path) is set to start the application, each window will have an additional shadow window for Agent operations; the real window will be displayed as usual, and the Agent's operations will be reflected on the screen in real time. Adding `KEEL_HEADLESS=1` will not display the window, see [Agent end-to-end test](../../docs/automation.md).
+
+```go
+window.Open(window.Options{Title: "Hello", Content: page})
+window.Main() // Exit the process after the last window is closed
+```
+
+Before changing the code here, read [Architecture · Cannot wait for the main thread](../../docs/architecture.md#avoid-waiting-for-the-main-thread-while-holding-the-lock) in the lock. See [Window and Application](../../docs/app.md) for details.
+
+`Main` for macOS subscribes to NSWorkspace's accessibility display preferences and scrollbar styles, reading "Reduce Dynamic Effects" and "Show Scrollbars" on startup, and updating `theme.ReducedMotion` and `theme.SystemScrollbarsAutoHide` when they change. The AppKit callback is handed to the background consumer through a bounded queue, and then the topic is updated in `core.Update` to avoid the main thread waiting for the frame lock. "Auto-hide scroll bars" is read once when Windows starts. Windowless and off-screen automation modes do not install native observers, Linux currently uses application settings.
+
+## macOS native traffic light layout
+
+Frameless windows can retain AppKit's standard buttons and center them within a custom titlebar. Layout uses dp; native button size, appearance and behavior remain owned by AppKit. A nil `TrafficLightLayout` keeps system placement. A positive `Height` enables custom placement, `Left` sets the first button's left inset, and `OffsetY` shifts its center down (positive) or up (negative). Zero `Spacing` preserves the system spacing.
+
+```go
+w := window.Open(window.Options{
+    Frameless: true,
+    NativeTrafficLights: true,
+    TrafficLightLayout: &window.TrafficLightLayout{
+        Height: 44, Left: 15, Spacing: 23,
+    },
+    Content: page,
+})
+w.SetTrafficLightLayout(window.TrafficLightLayout{Height: 64, Left: 20})
+```
+
+Reserve the top-left button area in your content. Keel reapplies placement after resizing, fullscreen transitions and AppKit layout passes. The option is macOS-only; runtime updates are safe from callbacks and background goroutines.
+
+Application menus and appearance are configured through Go APIs: `NewMenuBar`, `NewMenuIcon`, `MenuBar.SetWindowAnimation`, `MenuBar.CancelTracking`, `Window.MenuFeatures`, `SetApplicationMenu`, `SystemAppearance` and `SetNativeAppearance`. See [Window and Application](../../docs/app.md#application-menus-and-system-appearance) for customization and platform capabilities.
+
+Menu backends: AppKit on macOS, Win32 on Windows, Keel-rendered window menus on Linux (X11/Wayland). `Options.MenuDisplay` permits a custom window menu or application renderer. Focused custom editors handle standard operations through `core.NextEditAction`.
+
+## Resident applications
+
+`window.Main()` exits after the last window closes by default. Tray and other background applications can explicitly keep running. Resident mode drains `core.Update` with no windows, including updates while windows are minimized or occluded. The worker wakes on events and does not poll while idle.
+
+```go
+window.MainWithOptions(window.MainOptions{
+    KeepAlive: true,
+    OnQuit: func() { /* application cleanup */ },
+})
+```
+
+Call `window.Quit()` for explicit exit, from UI callbacks, background goroutines or with no windows. It runs remaining windows' `OnClose` callbacks followed by application `OnQuit`, once each under the frame lock, then exits the process. Main does not return and ordinary defers do not run. Callbacks must not wait for another `core.Update` or synchronously wait for the main thread. Closed windows remain closed: reopen with `window.Open` and keep business state outside the window. `OnClose` reports destruction and cannot intercept closure. See `examples/tray`.
+
+## Initial size and restoration
+
+`Options.AutoSize` chooses 75% of the suggested area, capped at 1600×1000dp.
+Currently Wayland supplies this area through xdg-shell v4, or estimates it as
+90% of the entered output's logical size when the compositor omits bounds.
+The estimate is not an exact work-area query. Without bounds, explicit sizes
+remain unchanged; omitted dimensions use 960×640dp in AutoSize mode. Existing
+windows without AutoSize keep the 640×480dp default. Compositors can override
+requests, especially for tiled windows. Minimum sizes still take precedence.
+
+Load `state, err := window.LoadSizeState(path)` before opening a window, then
+set `Options.SizeState = state`. Use a unique file for each logical window.
+Missing files start empty; malformed files return an error and usable empty
+state. A restored size takes precedence over AutoSize and is clamped to known
+bounds. State records normal client size only, not position or maximized mode.
+It is saved atomically on close/quit, outside the frame lock; errors go to stderr.
+`state.Save()` supports explicit saves from background work. The application
+chooses storage location and owns cleanup; no global preferences are modified.
+See `examples/app-shell`, which stores its size in the user cache directory.
+
+The fallback client title bar uses a minimum height and grows to fit the actual
+scaled title plus padding. Its content offset follows the measured height, so
+accessibility text scaling does not clip the title or overlap the body.
+
+Font scaling: `Options.TextScale` defaults to zero (platform preference). Set it to 1 for design-size text or a positive factor for an app preference; display density and dp geometry are unchanged. On Wayland, GNOME-family and Cinnamon sessions read their own text-scale setting; other desktops currently use 1 rather than inheriting an unrelated GNOME setting. Settings are read at startup, not watched live.
+
+Browser applications with their own URL router can set `Options.CustomBrowserHistory: true` when opening their window. This disables Gio's history sentinel and automatic Back-key translation, so the app owns `popstate` and `hashchange`. Leave it false for Gio's default Back behavior. Native windows ignore it.

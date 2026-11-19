@@ -1,0 +1,43 @@
+<p><img src="docs/images/keel.svg" alt="Keel" width="80" height="80"></p>
+
+# Keel
+
+English | [简体中文](README.zh-CN.md)
+
+Build desktop UIs in pure Go, without HTML, CSS, JavaScript, or a WebView. [Gio](https://gioui.org) draws the interface, with Keel's patched copy in [`gio/`](gio/) ([changes from upstream](docs/upstream-patches.md)); `native/` provides permissions, screenshots, synthetic input, global hotkeys, system notifications, and a rich clipboard. Keel runs on macOS, Windows, and Linux, compiles to WebAssembly for the browser, and supports [Mobile (iOS / Android)](docs/mobile.md).
+
+Create an application:
+
+```sh
+go install github.com/dyike/keel/cmd/keel@latest
+keel new my-app && cd my-app
+keel run            # Run
+keel build          # Package for the current platform (.app / .exe / Linux package with icons)
+```
+
+Start developing in the generated `app.go`. To explore the repository examples and component gallery:
+
+```sh
+go run ./examples/hello
+go run ./examples/components   # Component gallery: sidebar navigation and search
+go run ./examples/components -section motion_effects   # Cursor-origin glow/ripple and order confetti
+go run ./examples/chat -sample=all
+go test -race ./...
+```
+
+These examples default to English; pass `-lang zh-CN` to run them in Chinese.
+
+Requires Go 1.26+. On macOS, install Xcode Command Line Tools. On Linux, install the Wayland/X11 development packages; `keel doctor` checks the environment. Browse the [documentation and live gallery](https://keel.dyike.com).
+
+## Documentation
+
+- [Overview](docs/README.md): find guides for your development task.
+- [Getting started](docs/getting-started.md): create, develop, run, and package an application with the scaffold.
+- [Mobile (iOS / Android)](docs/mobile.md): build and run iOS and Android apps, with platform capability limits.
+- [Components](docs/kit.md): browse components by purpose, with APIs and interactive examples.
+- [Automation](docs/automation.md): let an agent click, type, scroll, and take screenshots.
+- [Architecture](docs/architecture.md): modules, dependency boundaries, and threading rules.
+
+## Licensing
+
+Keel is licensed under the [MIT License](LICENSE), free for commercial and closed-source use. See [LICENSING.md](LICENSING.md) and the [contribution guide](CONTRIBUTING.md).

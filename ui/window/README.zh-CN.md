@@ -1,0 +1,101 @@
+# ui/window
+
+[English](README.md) | 简体中文
+
+窗口：打开、关闭、置前（含激活令牌）、窗口快捷键、事件循环、离屏截图，以及读取系统偏好、补齐 Gio 没有的平台事件。
+
+| 文件 | 内容 |
+| --- | --- |
+| `window.go` | `Open`、`Main`、`Options`（含 `Overlay`）、`Window`（`Raise`、`Activate`、`WaylandDisplay` …） |
+| `memory.go` | 按需启用的进程级空闲 Go 堆回收 |
+| `shortcut.go` | 快捷键解析与分发 |
+| `icon*.go` | `SetIcon`：运行时的应用图标（macOS 程序坞、Windows 窗口、X11 `_NET_WM_ICON`），形状由 `internal/appicon` 按平台规范裁出 |
+| `root.go` | 窗口根视图：背景、滚动、24dp 边距 |
+| `glass*` | macOS 原生玻璃背景、透明 Metal 渲染及平台回退，见[用法](../../docs/app.zh-CN.md#macos-玻璃背景) |
+| `position_*` | 首次显示居中；macOS 按屏幕可用区域计算，其他平台使用 Gio 动作 |
+| `screenshot.go` | `Screenshot` 离屏渲染成 PNG |
+| `decorations*.go` | Linux 合成器不画标题栏时由 Keel 绘制 |
+| `titlebar_darwin.*` | macOS 无边框窗口的标题栏拖动区域 |
+| `scene_ios.*` | 实验性 iOS 单场景生命周期适配，需在 Info.plist 配置 `KeelSceneDelegate`，见 [iOS 验证](../../docs/ios.zh-CN.md) |
+| `activation_*` | `Activate(token)`：Wayland 走 xdg-activation，X11 写启动 ID 后请求激活 |
+| `motion_*` | 系统偏好：减少动态效果（macOS）、滚动条自动隐藏（macOS、Windows），写进 `theme` |
+| `motion_darwin.go`（macOS）、`scroll_wayland*` | 滚动的设备和手势阶段（触控板抬手、滚轮），Gio 不提供，交给 `core.ReportScrollGesture` |
+| `automation.go` | 自动化模式：内存窗口、语义快照、模拟点击输入滚动 |
+| `reload*.go`、`development.go` | `keel run` 重载：保存并恢复窗口尺寸、macOS 位置、`KeepState` 和内容的 `core.ReloadState` |
+| `headless.go` | `OpenHeadless`：供应用测试的内存窗口；`windowtest` 把它包装成 `testing.TB` 辅助 |
+| `automation_server.go` | 自动化协议：`KEEL_AUTOMATION` socket 上的 JSON 请求 |
+| `testdata/raise` | 真实窗口死锁回归测试 |
+
+- **依赖**：`core`、`theme`、`internal/appicon`（图标形状，和脚手架共用）、`ui/internal/appkit`（通过 purego 调 AppKit，仅 macOS，不用 cgo），以及 Linux 上的 `jezek/xgb`（X11 激活）和 libwayland-client（经 `ui/internal/wayland` 通过 purego 调用，不用 cgo，用 Gio 打开的连接）。不依赖 `el`、`kit`：窗口只认 `core.Widget` 接口，系统偏好经 `theme` 交给 el。
+- **被谁依赖**：应用代码。`cmd/keel-mcp` 通过 socket 协议驱动它，不引用它的代码。
+
+设置环境变量 `KEEL_AUTOMATION=1`（或 socket 路径）启动应用时，每个窗口会多一个影子窗口，供 Agent 操作；真实窗口照常显示，Agent 的操作会实时反映在屏幕上。再加 `KEEL_HEADLESS=1` 则不显示窗口，见 [Agent 端到端测试](../../docs/automation.zh-CN.md)。
+
+```go
+window.Open(window.Options{Title: "Hello", Content: page})
+window.Main() // 最后一个窗口关闭后退出进程
+```
+
+改这里的代码前先读 [架构 · 不能在锁内等待主线程](../../docs/architecture.zh-CN.md#不能在锁内等待主线程)。详见 [窗口与应用](../../docs/app.zh-CN.md)。
+
+macOS 的 `Main` 会订阅 NSWorkspace 的辅助功能显示偏好和滚动条样式，启动时读取“减少动态效果”和“显示滚动条”，变化时更新 `theme.ReducedMotion` 和 `theme.SystemScrollbarsAutoHide`。AppKit 回调通过有界队列交给后台消费者，再在 `core.Update` 中更新主题，避免主线程等待帧锁。Windows 启动时读一次“自动隐藏滚动条”。无窗口和离屏自动化模式不安装原生观察者，Linux 目前使用应用设置。
+
+## macOS 原生交通灯布局
+
+无边框窗口可以保留系统按钮，并按项目的标题栏高度居中。尺寸单位为 dp，按钮保留 AppKit 的外观、大小和行为。`TrafficLightLayout` 为 nil 时使用系统默认位置；`Height` 为正值时启用自定义位置。`OffsetY` 正值向下，负值向上；`Spacing` 为 0 时保留系统按钮间距。
+
+```go
+w := window.Open(window.Options{
+    Frameless: true,
+    NativeTrafficLights: true,
+    TrafficLightLayout: &window.TrafficLightLayout{
+        Height: 44, Left: 15, Spacing: 23,
+    },
+    Content: page,
+})
+// 标题栏样式变化时，无须重新创建窗口。
+w.SetTrafficLightLayout(window.TrafficLightLayout{Height: 64, Left: 20})
+```
+
+应用需为按钮预留左上区域。调整窗口大小、切换全屏及系统重新布局后，Keel 会恢复配置的位置。此选项仅在 macOS 生效；运行时设置可以在 UI 回调或后台 goroutine 中调用。
+
+应用菜单和系统外观通过 Go API 配置：`NewMenuBar`、`NewMenuIcon`、`MenuBar.SetWindowAnimation`、`MenuBar.CancelTracking`、`Window.MenuFeatures`、`SetApplicationMenu`、`SystemAppearance`、`SetNativeAppearance`。自定义方式和平台能力见[窗口与应用](../../docs/app.zh-CN.md#应用菜单与系统外观)。
+
+菜单后端：macOS 使用 AppKit，Windows 使用 Win32，Linux（X11/Wayland）由 Keel 绘制窗口内菜单。`Options.MenuDisplay` 可选择窗口内菜单或应用自行绘制；自定义编辑器通过 `core.NextEditAction` 处理标准编辑操作。
+
+## 驻留应用
+
+`window.Main()` 默认在最后一个窗口关闭后退出。托盘或其他后台应用可以显式开启驻留，所有窗口关闭后仍消费 `core.Update`，包括最小化或遮挡时的更新；执行器由事件唤醒，空闲时不轮询。
+
+```go
+window.MainWithOptions(window.MainOptions{
+    KeepAlive: true,
+    OnQuit: func() { /* application cleanup */ },
+})
+```
+
+通过 `window.Quit()` 显式退出，可以在 UI 回调、后台 goroutine 或没有窗口时调用。它依次执行仍打开窗口的 `OnClose` 和应用 `OnQuit`，各执行一次并持有 frame lock，然后退出进程；`Main` 不返回，普通 defer 不会执行。回调中不要等待下一次 `core.Update` 或同步等待主线程。关闭后的窗口仍不能重新显示，需要重新 `window.Open`；将业务状态保存在窗口之外。`OnClose` 是销毁后的通知，不能拦截关闭。参见 `examples/tray`。
+
+## 初始尺寸与恢复
+
+`Options.AutoSize` 使用建议区域的 75%，上限为 1600×1000dp。
+目前由 Wayland 的 xdg-shell v4 提供该区域；合成器未提供时，使用窗口所在
+显示器逻辑尺寸的 90% 作为保守估计。该估计不是精确的桌面工作区查询。
+没有边界信息时保留显式尺寸；AutoSize 模式下省略的尺寸默认为 960×640dp。
+未启用 AutoSize 的窗口仍默认 640×480dp。合成器可以覆盖尺寸请求，特别是
+平铺窗口；应用设置的最小尺寸仍优先。
+
+打开窗口前调用 `state, err := window.LoadSizeState(path)`，然后设置
+`Options.SizeState = state`。每个逻辑窗口使用独立文件。文件不存在时使用
+空状态；文件损坏时返回错误及可继续使用的空状态。恢复的尺寸优先于 AutoSize，
+并受已知屏幕边界约束。只记录普通窗口的客户区尺寸，不记录位置或最大化状态。
+关闭/退出时在帧锁外原子保存，错误输出到 stderr；后台工作也可显式调用
+`state.Save()`。应用决定存储位置和清理策略，不修改全局偏好。
+`examples/app-shell` 将尺寸保存在用户缓存目录。
+
+备用客户端标题栏使用最小高度，并根据缩放后的标题文字和内边距自动增高。
+正文偏移跟随实际测量高度，避免无障碍字体缩放造成标题裁切或正文重叠。
+
+字体缩放：`Options.TextScale` 默认为零（平台设置），设为 1 使用设计字号，或设为正数实现应用字号偏好；显示密度和 dp 布局不变。Wayland 下 GNOME 系桌面与 Cinnamon 读取各自的字体缩放；其他桌面目前使用 1，不继承无关的 GNOME 设置。设置在启动时读取，暂不实时监听。
+
+自行管理 URL 路由的浏览器应用，可在打开窗口时设置 `Options.CustomBrowserHistory: true`。此选项停用 Gio 的历史记录占位项和自动返回键转换，由应用负责 `popstate` 与 `hashchange`。保持 false 则沿用 Gio 默认返回行为。原生窗口忽略此选项。

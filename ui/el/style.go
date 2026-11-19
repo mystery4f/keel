@@ -1,0 +1,219 @@
+package el
+
+import (
+	"image/color"
+
+	"github.com/dyike/keel/gio/font"
+	"github.com/dyike/keel/ui/theme"
+
+	"github.com/dyike/keel/gio/io/pointer"
+	"github.com/dyike/keel/gio/unit"
+)
+
+// Length is a size along one axis: automatic, a fixed number of dp or sp, or a
+// fraction of the parent's content box.
+type Length struct {
+	kind  lengthKind
+	value float32
+}
+
+type lengthKind uint8
+
+const (
+	autoLen lengthKind = iota
+	dpLen
+	fracLen
+	spLen
+)
+
+// Auto sizes an element to its content, or stretches it where the parent aligns
+// items with Stretch.
+var Auto = Length{}
+
+// Dp is a fixed length.
+func Dp(v float32) Length { return Length{dpLen, v} }
+
+// Sp is a fixed length that follows the user's font scale.
+func Sp(v float32) Length { return Length{spLen, v} }
+
+// Frac is a fraction of the parent's content box: Frac(1) is the full width.
+func Frac(f float32) Length { return Length{fracLen, f} }
+
+// Full is Frac(1).
+var Full = Frac(1)
+
+// px resolves l against a parent size in pixels; -1 means automatic.
+func (l Length) px(m unit.Metric, parent int) int {
+	switch l.kind {
+	case dpLen:
+		return m.Dp(unit.Dp(l.value))
+	case spLen:
+		return m.Sp(unit.Sp(l.value))
+	case fracLen:
+		if parent < 0 || parent >= inf {
+			return -1
+		}
+		return int(float32(parent) * l.value)
+	}
+	return -1
+}
+
+// Edges are per-side lengths in dp.
+type Edges struct{ Top, Right, Bottom, Left float32 }
+
+// Align positions children along an axis.
+type Align uint8
+
+const (
+	Start Align = iota
+	Center
+	End
+	Stretch       // cross axis only: fill the container
+	SpaceBetween  // main axis only
+	SpaceAround   // main axis only
+	ContentBottom // row cross axis only: align selected descendant bottoms
+	FirstLine     // row cross axis only: line up first lines of text; children without text center on it
+)
+
+// Style is everything an element can look like. Build it with the methods
+// shared by all elements (see Styled); Hover and Active take a func that
+// changes a Style, whose methods mirror the element ones.
+type Style struct {
+	sharedGradient          *sharedGradient // paint-only shared handoff
+	reveal                  float32
+	revealSet               bool
+	wrap                    bool
+	wrapFit                 bool
+	grid                    int
+	colSpan                 int
+	row                     bool // lay children out left to right; default top to bottom
+	w, h, minW, minH        Length
+	aspectRatio             float32
+	maxW, maxH              Length
+	pad, margin             Edges
+	gap                     float32
+	grow, shrink            float32
+	justify, align          Align
+	alignSet                bool // align was set by Items; see crossAlign
+	contentBottom           *Node
+	scrollX, scrollY        bool
+	scrollbarMode           ScrollbarMode
+	scrollbarModeSet        bool
+	controlledScroll        *[2]float32
+	pinX                    int // -1 left, +1 right of nearest horizontal viewport
+	translate               [2]float32
+	pinOffset               float32
+	stickBottom             bool
+	endVersion, keepVersion int // ScrollToEndOn; jumps to the end when it changes
+	absolute                bool
+	top, right, bottom      optional[float32]
+	left                    optional[float32]
+	bg                      optional[color.NRGBA]
+	corners                 optional[[4]float32] // per-corner radii; overrides radius
+	gradient                *theme.Gradient      // painted instead of bg when set
+	borderWidth, radius     float32
+	borderColor             color.NRGBA
+	borderDashed            bool
+	cursor                  pointer.Cursor
+	hidden                  bool
+	shadow                  *theme.Elevation
+	opacity                 float32
+	opacitySet              bool
+	text                    textStyle
+}
+
+// Optional values stay inline. Presence is independent of the value: transparent
+// colors, Start alignment, zero offsets and normal weight override inheritance.
+// Unlike pointers into a Style, these remain independent when a style is copied.
+type optional[T any] struct {
+	value T
+	set   bool
+}
+
+func some[T any](v T) optional[T] { return optional[T]{value: v, set: true} }
+
+func (o optional[T]) or(fallback T) T {
+	if o.set {
+		return o.value
+	}
+	return fallback
+}
+
+// textStyle is inherited by descendants unless they set their own.
+type textStyle struct {
+	align      optional[Align]
+	color      optional[color.NRGBA]
+	size       unit.Sp
+	weight     optional[font.Weight]
+	mono       optional[bool]
+	italic     optional[bool]
+	lineHeight float32 // multiple of the size; 0 keeps the font's own
+	lines      int
+}
+
+func (t textStyle) inherit(parent textStyle) textStyle {
+	if !t.align.set {
+		t.align = parent.align
+	}
+	if !t.color.set {
+		t.color = parent.color
+	}
+	if t.size == 0 {
+		t.size = parent.size
+	}
+	if !t.weight.set {
+		t.weight = parent.weight
+	}
+	if !t.mono.set {
+		t.mono = parent.mono
+	}
+	if !t.italic.set {
+		t.italic = parent.italic
+	}
+	if t.lineHeight == 0 {
+		t.lineHeight = parent.lineHeight
+	}
+	if t.lines == 0 {
+		t.lines = parent.lines
+	}
+	return t
+}
+
+// Visual changes, usable in Hover and Active. They return the Style so calls chain.
+func (s *Style) Bg(c color.NRGBA) *Style {
+	s.bg, s.gradient, s.sharedGradient = some(c), nil, nil
+	return s
+}
+
+// BgGradient fills the background with a linear gradient instead of a solid
+// color; a later Bg replaces it. A zero gradient changes nothing, so a
+// theme's optional gradient can be passed as is.
+func (s *Style) BgGradient(g theme.Gradient) *Style {
+	if !g.IsZero() {
+		s.gradient, s.sharedGradient = &g, nil
+	}
+	return s
+}
+func (s *Style) BorderColor(c color.NRGBA) *Style { s.borderColor = c; return s }
+func (s *Style) TextColor(c color.NRGBA) *Style   { s.text.color = some(c); return s }
+
+func rgb(c uint32) color.NRGBA {
+	return color.NRGBA{R: uint8(c >> 16), G: uint8(c >> 8), B: uint8(c), A: 0xff}
+}
+
+// BorderDashed switches the border between dashed and solid.
+func (s *Style) BorderDashed(on bool) *Style { s.borderDashed = on; return s }
+
+// crossAlign is the cross-axis alignment in effect. Rows center their
+// children by default, so an icon beside text lines up without Items(Center):
+// stretching left text drawn at the top of a taller box. Columns and grids
+// stretch, so blocks fill the width and grid cells share a row's height.
+func (s *Style) crossAlign() Align {
+	if s.alignSet {
+		return s.align
+	}
+	if s.row && s.grid == 0 {
+		return Center
+	}
+	return Stretch
+}

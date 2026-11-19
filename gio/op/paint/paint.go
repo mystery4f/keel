@@ -1,0 +1,285 @@
+// SPDX-License-Identifier: Unlicense OR MIT
+
+package paint
+
+import (
+	"encoding/binary"
+	"image"
+	"image/color"
+	"image/draw"
+	"math"
+	"sync"
+
+	"github.com/dyike/keel/gio/f32"
+	"github.com/dyike/keel/gio/internal/dirty"
+	"github.com/dyike/keel/gio/internal/f32color"
+	"github.com/dyike/keel/gio/internal/ops"
+	"github.com/dyike/keel/gio/internal/surface"
+	"github.com/dyike/keel/gio/op"
+	"github.com/dyike/keel/gio/op/clip"
+)
+
+// ImageFilter is the scaling filter for images.
+type ImageFilter byte
+
+const (
+	// FilterLinear uses linear interpolation for scaling.
+	FilterLinear ImageFilter = iota
+	// FilterNearest uses nearest neighbor interpolation for scaling.
+	FilterNearest
+	// FilterLinearNoMipmap uses linear interpolation without mipmaps.
+	// Uploads and updates skip building the mipmap chain, which suits
+	// images that change often and are not drawn below half size, where
+	// they would alias. Keel patch.
+	FilterLinearNoMipmap
+)
+
+// ImageOp sets the brush to an image.
+type ImageOp struct {
+	Filter ImageFilter
+
+	uniform bool
+	color   color.NRGBA
+	src     *image.RGBA
+	mask    *image.Alpha
+	surface *surface.Surface
+
+	// handle is a key to uniquely identify this ImageOp
+	// in a map of cached textures.
+	handle any
+}
+
+// ColorOp sets the brush to a constant color.
+type ColorOp struct {
+	Color color.NRGBA
+}
+
+// LinearGradientOp sets the brush to a gradient starting at stop1 with color1 and
+// ending at stop2 with color2.
+type LinearGradientOp struct {
+	Stop1  f32.Point
+	Color1 color.NRGBA
+	Stop2  f32.Point
+	Color2 color.NRGBA
+}
+
+// PaintOp fills the current clip area with the current brush.
+type PaintOp struct{}
+
+// OpacityStack represents an opacity applied to all painting operations
+// until Pop is called.
+type OpacityStack struct {
+	id      ops.StackID
+	macroID uint32
+	ops     *ops.Ops
+}
+
+// NewImageOp creates an ImageOp backed by src.
+//
+// NewImageOp assumes the backing image is immutable, and may cache a
+// copy of its contents in a GPU-friendly way. Create new ImageOps to
+// ensure that changes to an image is reflected in the display of
+// it.
+func NewImageOp(src image.Image) ImageOp {
+	switch src := src.(type) {
+	case *image.Uniform:
+		col := color.NRGBAModel.Convert(src.C).(color.NRGBA)
+		return ImageOp{
+			uniform: true,
+			color:   col,
+		}
+	case *image.RGBA:
+		return ImageOp{
+			src:    src,
+			handle: new(int),
+		}
+	}
+
+	sz := src.Bounds().Size()
+	// Copy the image into a GPU friendly format.
+	dst := image.NewRGBA(image.Rectangle{
+		Max: sz,
+	})
+	draw.Draw(dst, dst.Bounds(), src, src.Bounds().Min, draw.Src)
+	return ImageOp{
+		src:    dst,
+		handle: new(int),
+	}
+}
+
+// NewMutableImageOp creates an ImageOp whose pixels the caller may change
+// between frames. After writing pixels inside r, call Invalidate(r); a
+// renderer that already holds a texture for the image then uploads only the
+// changed area instead of creating a new texture. Write src only while no
+// frame using it is being rendered, for example during layout. Keel patch.
+func NewMutableImageOp(src *image.RGBA) ImageOp {
+	return ImageOp{src: src, handle: new(dirty.Tracker)}
+}
+
+// NewSharedImageOp is NewMutableImageOp for pixels written outside the
+// frame, such as a video decoder's framebuffer, without a second copy for
+// rendering. A renderer reads src only while holding mu: when it creates
+// the texture and when it uploads changed areas, which it does during the
+// frame, not later. Write src and call Invalidate while holding mu, from
+// any goroutine, and hold it briefly: a frame that needs to upload waits
+// for it. Images may share one mu, for example tiles cut from one
+// framebuffer with SubImage. Keel patch.
+func NewSharedImageOp(src *image.RGBA, mu sync.Locker) ImageOp {
+	return ImageOp{src: src, handle: &dirty.Tracker{Pixels: mu}}
+}
+
+// Surface is an image held in the platform's GPU memory, an IOSurface on
+// Apple platforms, that renderers sample without copying. Its owner swaps
+// the picture with Set and keeps each surface valid until it has set two
+// later ones. Renderers without surface support draw nothing for it. Keel
+// patch.
+type Surface = surface.Surface
+
+// NewSurfaceOp creates an ImageOp that shows the current picture of s.
+func NewSurfaceOp(s *Surface) ImageOp {
+	return ImageOp{surface: s, handle: s}
+}
+
+// Invalidate records that the pixels of a mutable image inside r, in the
+// source image's coordinates, changed. It does nothing for other images.
+func (i ImageOp) Invalidate(r image.Rectangle) {
+	t, ok := i.handle.(*dirty.Tracker)
+	if !ok || i.src == nil {
+		return
+	}
+	t.Invalidate(r.Intersect(i.src.Rect).Sub(i.src.Rect.Min))
+}
+
+// NewMaskOp creates a premultiplied white coverage brush. Unlike an alpha
+// image passed to NewImageOp, it keeps one linear coverage byte per pixel.
+// The backing pixels must be immutable, as with NewImageOp. Backends without
+// single-channel textures expand it when uploading, not in the text cache.
+func NewMaskOp(src *image.Alpha) ImageOp {
+	return ImageOp{mask: src, handle: new(int)}
+}
+
+func (i ImageOp) Size() image.Point {
+	if i.surface != nil {
+		_, size, _ := i.surface.Current()
+		return size
+	}
+	if i.mask != nil {
+		return i.mask.Bounds().Size()
+	}
+	if i.src == nil {
+		return image.Point{}
+	}
+	return i.src.Bounds().Size()
+}
+
+func (i ImageOp) Add(o *op.Ops) {
+	i.addTinted(o, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+}
+
+func (i ImageOp) addTinted(o *op.Ops, tint color.NRGBA) {
+	if i.uniform {
+		col := i.color
+		if tint != (color.NRGBA{R: 255, G: 255, B: 255, A: 255}) {
+			a, b := f32color.LinearFromSRGB(col), f32color.LinearFromSRGB(tint)
+			col = (f32color.RGBA{R: a.R * b.R, G: a.G * b.G, B: a.B * b.B, A: a.A * b.A}).SRGB()
+		}
+		ColorOp{Color: col}.Add(o)
+		return
+	} else if size := i.Size(); size.X <= 0 || size.Y <= 0 {
+		return
+	}
+	i.write(o, ops.TypeImage, tint)
+}
+
+// write encodes a non-uniform, non-empty image brush as an operation of type
+// t: TypeImage, or TypeImageQuads (Keel patch).
+func (i ImageOp) write(o *op.Ops, t ops.OpType, tint color.NRGBA) {
+	var src any = i.src
+	if i.mask != nil {
+		src = i.mask
+	}
+	if i.surface != nil {
+		src = i.surface
+	}
+	data := ops.Write2(&o.Internal, ops.TypeImageLen, src, i.handle)
+	data[0] = byte(t)
+	data[1] = byte(i.Filter)
+	data[2], data[3], data[4], data[5] = tint.R, tint.G, tint.B, tint.A
+}
+
+func (c ColorOp) Add(o *op.Ops) {
+	data := ops.Write(&o.Internal, ops.TypeColorLen)
+	data[0] = byte(ops.TypeColor)
+	data[1] = c.Color.R
+	data[2] = c.Color.G
+	data[3] = c.Color.B
+	data[4] = c.Color.A
+}
+
+func (c LinearGradientOp) Add(o *op.Ops) {
+	data := ops.Write(&o.Internal, ops.TypeLinearGradientLen)
+	data[0] = byte(ops.TypeLinearGradient)
+
+	bo := binary.LittleEndian
+	bo.PutUint32(data[1:], math.Float32bits(c.Stop1.X))
+	bo.PutUint32(data[5:], math.Float32bits(c.Stop1.Y))
+	bo.PutUint32(data[9:], math.Float32bits(c.Stop2.X))
+	bo.PutUint32(data[13:], math.Float32bits(c.Stop2.Y))
+
+	data[17+0] = c.Color1.R
+	data[17+1] = c.Color1.G
+	data[17+2] = c.Color1.B
+	data[17+3] = c.Color1.A
+	data[21+0] = c.Color2.R
+	data[21+1] = c.Color2.G
+	data[21+2] = c.Color2.B
+	data[21+3] = c.Color2.A
+}
+
+func (d PaintOp) Add(o *op.Ops) {
+	data := ops.Write(&o.Internal, ops.TypePaintLen)
+	data[0] = byte(ops.TypePaint)
+}
+
+// FillShape fills the clip shape with a color.
+func FillShape(ops *op.Ops, c color.NRGBA, shape clip.Op) {
+	defer shape.Push(ops).Pop()
+	Fill(ops, c)
+}
+
+// Fill paints an infinitely large plane with the provided color. It
+// is intended to be used with a clip.Op already in place to limit
+// the painted area. Use FillShape unless you need to paint several
+// times within the same clip.Op.
+func Fill(ops *op.Ops, c color.NRGBA) {
+	ColorOp{Color: c}.Add(ops)
+	PaintOp{}.Add(ops)
+}
+
+// PushOpacity creates a drawing layer with an opacity in the range [0;1].
+// The layer includes every subsequent drawing operation until [OpacityStack.Pop]
+// is called.
+//
+// The layer is drawn in two steps. First, the layer operations are
+// drawn to a separate image. Then, the image is blended on top of
+// the frame, with the opacity used as the blending factor.
+func PushOpacity(o *op.Ops, opacity float32) OpacityStack {
+	if opacity > 1 {
+		opacity = 1
+	}
+	if opacity < 0 {
+		opacity = 0
+	}
+	id, macroID := ops.PushOp(&o.Internal, ops.OpacityStack)
+	data := ops.Write(&o.Internal, ops.TypePushOpacityLen)
+	bo := binary.LittleEndian
+	data[0] = byte(ops.TypePushOpacity)
+	bo.PutUint32(data[1:], math.Float32bits(opacity))
+	return OpacityStack{ops: &o.Internal, id: id, macroID: macroID}
+}
+
+func (t OpacityStack) Pop() {
+	ops.PopOp(t.ops, ops.OpacityStack, t.id, t.macroID)
+	data := ops.Write(t.ops, ops.TypePopOpacityLen)
+	data[0] = byte(ops.TypePopOpacity)
+}

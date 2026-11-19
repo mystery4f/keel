@@ -1,0 +1,230 @@
+// Package locale holds the text Keel itself shows or reports to agents: button
+// captions such as 确定 and 复制, accessible names such as 关闭, placeholders
+// and counts. Apply switches all of it at runtime and redraws every window.
+//
+// Only framework text lives here. An app translates its own labels however it
+// likes; Lang tells it which language is active, and Revision changes on every
+// Apply so render caches can include it.
+package locale
+
+import (
+	"strconv"
+	"time"
+
+	"github.com/dyike/keel/ui/internal/loop"
+)
+
+// Strings is every piece of framework text. Start from Chinese or English
+// when customizing: Apply replaces all of it.
+type Strings struct {
+	Terminal                                                                         string
+	EmojiGroups                                                                      [9]string
+	EmojiResults                                                                     string
+	EmojiChoose                                                                      string
+	EmojiPicker, EmojiSearch, EmojiAll, EmojiRecent                                  string
+	EmojiTones                                                                       [6]string
+	DiffExpand, DiffCollapse                                                         string
+	DiffPrevious, DiffNext, DiffKeep, DiffRevert, DiffBefore, DiffAfter, DiffUnified string
+	Hour, Minute, Second, AM, PM, Period                                             string
+	LowerValue, UpperValue                                                           string
+	Clock12                                                                          bool   // Default segmented time format.
+	Lang                                                                             string // BCP 47 tag of this text, e.g. zh-CN, en
+
+	Year, PrevYear, NextYear, RangeUnavailable string
+	MonthNames                                 [12]string
+
+	OK, Cancel, Close, Remove, Toggle, Clear, Retry string
+	Cut, Paste, SelectAll                           string
+	Copy, Copied                                    string
+	Loading, Menu, MoreOptions                      string
+	SelectHint, NoData                              string
+	Image, ImageLoading, ImageFailed                string
+	PlainText, WrapLines, NoWrapLines               string
+	Search, NoMatches                               string
+	Increase, Decrease                              string
+	PrevMonth, NextMonth                            string
+	PrevPage, NextPage                              string
+	Commands, SearchCommands                        string
+	Canceled                                        string
+	Sending, SendFailed                             string
+	Latest, Uploading                               string
+	AttachmentPending                               string
+	AttachmentProcessing                            string
+	AttachmentFailed                                string
+	More, Resize                                    string
+	CollapseSidebar, ExpandSidebar                  string
+	PrevSlide, NextSlide                            string
+	DockLeft, DockRight, DockBottom                 string
+	// Names of the buttons that show and hide a Dock region.
+	DockLeftRegion, DockRightRegion, DockBottomRegion string
+	DockCenter, DockDetach                            string
+	DockSplitRight, DockSplitBelow                    string
+	DockZoom, DockRestore                             string
+	CodeEditor                                        string
+	Find, Replace, ReplaceAll, PrevMatch, NextMatch   string
+	MatchCase, WholeWord, RegularExpression           string
+	InvalidPattern, FoldRegion, UnfoldRegion          string
+	Skip, SearchSettings, ResetSettings               string
+	Minimize, Maximize, Restore                       string
+	CandleOpen, CandleHigh, CandleLow, CandleClose    string
+	ChartValue, ChartShare                            string
+	ShowTable, ShowChart, ResetView                   string
+	ColorShade, Hue, Opacity                          string
+	ColorFormat                                       string
+	Previous, Next, Submit, Required, AnswerOrSkip    string
+	// Progress formats "question i of n", e.g. "第 3 / 10 题".
+	Progress func(i, n int) string
+	// Total formats an item count for a pager, e.g. "共 36 条".
+	Total func(n int) string
+
+	// Weekdays are short day names starting with Sunday; FirstWeekday is the
+	// column a calendar starts with (time.Monday for Chinese).
+	Weekdays     [7]string
+	FirstWeekday time.Weekday
+	// Month titles a calendar page, e.g. "2026年10月" or "October 2026".
+	Month func(year int, month time.Month) string
+	// Date formats a day for a date field, e.g. "2026-10-01".
+	Date func(t time.Time) string
+
+	// Rows formats a row count, e.g. "36 行" or "36 rows".
+	Rows func(n int) string
+	// Detail joins a status and its reason: "发送失败：网络中断", "Send failed: offline".
+	Detail func(status, reason string) string
+}
+
+// Name joins an action and its target into an accessible name, such as
+// "关闭 保存成功" or "Close Saved".
+func (s Strings) Name(action, target string) string {
+	if target == "" {
+		return action
+	}
+	return action + " " + target
+}
+
+// Chinese returns the default text, simplified Chinese.
+func Chinese() Strings {
+	return Strings{
+		LowerValue: "下限", UpperValue: "上限",
+		Hour: "时", Minute: "分", Second: "秒", AM: "上午", PM: "下午", Period: "时段",
+		EmojiGroups: [9]string{"笑脸与情感", "人物与身体", "动物与自然", "食物与饮料", "旅行与地点", "活动", "物品", "符号", "旗帜"},
+		Terminal:    "终端", EmojiPicker: "表情选择器", EmojiSearch: "搜索表情", EmojiAll: "全部", EmojiRecent: "最近使用", EmojiChoose: "选择表情", EmojiResults: "表情结果", EmojiTones: [6]string{"默认肤色", "浅肤色", "较浅肤色", "中等肤色", "较深肤色", "深肤色"},
+		DiffExpand: "展开上下文", DiffCollapse: "折叠上下文", DiffPrevious: "上一个差异", DiffNext: "下一个差异", DiffKeep: "保留更改", DiffRevert: "还原更改", DiffBefore: "更改前", DiffAfter: "更改后", DiffUnified: "统一差异",
+		Lang: "zh-CN", Year: "年份", PrevYear: "上一年", NextYear: "下一年", RangeUnavailable: "范围包含不可选日期，请重新选择", MonthNames: [12]string{"1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"},
+		OK: "确定", Cancel: "取消", Close: "关闭", Remove: "移除", Toggle: "切换", Clear: "清空", Retry: "重试",
+		Cut: "剪切", Paste: "粘贴", SelectAll: "全选",
+		Copy: "复制", Copied: "已复制",
+		Loading: "加载中", Menu: "菜单", MoreOptions: "更多选项",
+		SelectHint: "请选择", NoData: "暂无数据",
+		Image: "图片", ImageLoading: "图片加载中", ImageFailed: "图片加载失败",
+		PlainText: "纯文本", WrapLines: "自动换行", NoWrapLines: "取消自动换行",
+		Search: "搜索", NoMatches: "无匹配项", Increase: "增加", Decrease: "减少",
+		PrevMonth: "上个月", NextMonth: "下个月", PrevPage: "上一页", NextPage: "下一页",
+		Commands: "命令面板", SearchCommands: "搜索命令…",
+		Canceled: "已取消", Sending: "发送中", SendFailed: "发送失败",
+		Latest: "回到最新", Uploading: "上传中",
+		AttachmentPending: "待上传", AttachmentProcessing: "处理中", AttachmentFailed: "上传失败",
+		More: "更多", Resize: "调整大小", CollapseSidebar: "收起侧栏", ExpandSidebar: "展开侧栏",
+		PrevSlide: "上一张", NextSlide: "下一张",
+		DockSplitRight: "向右拆分", DockSplitBelow: "向下拆分", DockZoom: "最大化", DockRestore: "还原", CodeEditor: "代码编辑器", Find: "查找", Replace: "替换", ReplaceAll: "全部替换", PrevMatch: "上一个匹配", NextMatch: "下一个匹配", MatchCase: "区分大小写", WholeWord: "全字匹配", RegularExpression: "正则表达式", InvalidPattern: "表达式无效", FoldRegion: "折叠", UnfoldRegion: "展开", DockLeft: "停靠到左侧", DockRight: "停靠到右侧", DockBottom: "停靠到底部", DockCenter: "移到中间", DockDetach: "在新窗口打开", DockLeftRegion: "左侧面板", DockRightRegion: "右侧面板", DockBottomRegion: "底部面板", SearchSettings: "搜索设置", ResetSettings: "重置此页", Skip: "跳过",
+		Minimize: "最小化", Maximize: "最大化", Restore: "还原",
+		CandleOpen: "开盘", CandleHigh: "最高", CandleLow: "最低", CandleClose: "收盘",
+		ChartValue: "数值", ChartShare: "占比", ShowTable: "查看数据表", ShowChart: "查看图表", ResetView: "复位",
+		ColorShade: "饱和度与亮度", Hue: "色相", Opacity: "不透明度", ColorFormat: "颜色格式",
+		Previous: "上一题", Next: "下一题", Submit: "提交", Required: "这一题必须回答", AnswerOrSkip: "请作答或选择跳过",
+		Progress:     func(i, n int) string { return "第 " + strconv.Itoa(i) + " / " + strconv.Itoa(n) + " 题" },
+		Total:        func(n int) string { return "共 " + strconv.Itoa(n) + " 条" },
+		Weekdays:     [7]string{"日", "一", "二", "三", "四", "五", "六"},
+		FirstWeekday: time.Monday,
+		Month:        func(y int, m time.Month) string { return strconv.Itoa(y) + "年" + strconv.Itoa(int(m)) + "月" },
+		Date:         func(t time.Time) string { return t.Format("2006-01-02") },
+		Rows:         func(n int) string { return strconv.Itoa(n) + " 行" },
+		Detail:       func(status, reason string) string { return status + "：" + reason },
+	}
+}
+
+// English returns English text.
+func English() Strings {
+	return Strings{
+		LowerValue: "Lower", UpperValue: "Upper",
+		Hour: "Hour", Minute: "Minute", Second: "Second", AM: "AM", PM: "PM", Period: "Period", Clock12: true,
+		EmojiGroups: [9]string{"Smileys & Emotion", "People & Body", "Animals & Nature", "Food & Drink", "Travel & Places", "Activities", "Objects", "Symbols", "Flags"},
+		Terminal:    "Terminal", EmojiPicker: "Emoji picker", EmojiSearch: "Search emoji", EmojiAll: "All", EmojiRecent: "Recent", EmojiChoose: "Choose an emoji", EmojiResults: "Emoji results", EmojiTones: [6]string{"Default skin tone", "Light skin tone", "Medium-light skin tone", "Medium skin tone", "Medium-dark skin tone", "Dark skin tone"},
+		DiffExpand: "Expand context", DiffCollapse: "Collapse context", DiffPrevious: "Previous change", DiffNext: "Next change", DiffKeep: "Keep change", DiffRevert: "Revert change", DiffBefore: "Before", DiffAfter: "After", DiffUnified: "Unified diff",
+		Lang: "en", Year: "Year", PrevYear: "Previous year", NextYear: "Next year", RangeUnavailable: "Range includes unavailable dates; choose again", MonthNames: [12]string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"},
+		OK: "OK", Cancel: "Cancel", Close: "Close", Remove: "Remove", Toggle: "Toggle", Clear: "Clear", Retry: "Retry",
+		Cut: "Cut", Paste: "Paste", SelectAll: "Select All",
+		Copy: "Copy", Copied: "Copied",
+		Loading: "Loading", Menu: "Menu", MoreOptions: "More options",
+		SelectHint: "Select…", NoData: "No data",
+		Image: "Image", ImageLoading: "Loading image", ImageFailed: "Image failed to load",
+		PlainText: "Plain text", WrapLines: "Wrap lines", NoWrapLines: "Don't wrap lines",
+		Search: "Search", NoMatches: "No matches", Increase: "Increase", Decrease: "Decrease",
+		PrevMonth: "Previous month", NextMonth: "Next month", PrevPage: "Previous page", NextPage: "Next page",
+		Commands: "Command palette", SearchCommands: "Type a command…",
+		Canceled: "Canceled", Sending: "Sending", SendFailed: "Send failed",
+		Latest: "Jump to latest", Uploading: "Uploading",
+		AttachmentPending: "Ready to upload", AttachmentProcessing: "Processing", AttachmentFailed: "Upload failed",
+		More: "More", Resize: "Resize", CollapseSidebar: "Collapse sidebar", ExpandSidebar: "Expand sidebar",
+		PrevSlide: "Previous slide", NextSlide: "Next slide",
+		DockSplitRight: "Split right", DockSplitBelow: "Split below", DockZoom: "Maximize", DockRestore: "Restore", CodeEditor: "Code editor", Find: "Find", Replace: "Replace", ReplaceAll: "Replace all", PrevMatch: "Previous match", NextMatch: "Next match", MatchCase: "Match case", WholeWord: "Whole word", RegularExpression: "Regular expression", InvalidPattern: "Invalid pattern", FoldRegion: "Fold", UnfoldRegion: "Unfold", DockLeft: "Dock left", DockRight: "Dock right", DockBottom: "Dock bottom", DockCenter: "Move to center", DockDetach: "Open in new window", DockLeftRegion: "Left panel", DockRightRegion: "Right panel", DockBottomRegion: "Bottom panel", SearchSettings: "Search settings", ResetSettings: "Reset page", Skip: "Skip",
+		Minimize: "Minimize", Maximize: "Maximize", Restore: "Restore",
+		CandleOpen: "Open", CandleHigh: "High", CandleLow: "Low", CandleClose: "Close",
+		ChartValue: "Value", ChartShare: "Share", ShowTable: "Show data table", ShowChart: "Show chart", ResetView: "Reset view",
+		ColorShade: "Saturation and brightness", Hue: "Hue", Opacity: "Opacity", ColorFormat: "Color format",
+		Previous: "Previous", Next: "Next", Submit: "Submit", Required: "This question needs an answer", AnswerOrSkip: "Answer or choose Skip",
+		Progress: func(i, n int) string { return "Question " + strconv.Itoa(i) + " of " + strconv.Itoa(n) },
+		Total: func(n int) string {
+			if n == 1 {
+				return "1 item"
+			}
+			return strconv.Itoa(n) + " items"
+		},
+		Weekdays:     [7]string{"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"},
+		FirstWeekday: time.Sunday,
+		Month:        func(y int, m time.Month) string { return m.String() + " " + strconv.Itoa(y) },
+		Date:         func(t time.Time) string { return t.Format("Jan 2, 2006") },
+		Detail:       func(status, reason string) string { return status + ": " + reason },
+		Rows: func(n int) string {
+			if n == 1 {
+				return "1 row"
+			}
+			return strconv.Itoa(n) + " rows"
+		},
+	}
+}
+
+var (
+	current  = Chinese()
+	revision uint64
+)
+
+// Current returns the active text. Read it under the UI lock, in Render or a
+// callback, or before opening the first window.
+func Current() Strings { return current }
+
+// Revision changes whenever Apply replaces the text.
+func Revision() uint64 { return revision }
+
+// Apply replaces the framework text and redraws every window. Call it before
+// opening windows or under the UI lock; from other goroutines use
+// core.Update(func() { locale.Apply(s) }). A nil Rows keeps the current one.
+func Apply(s Strings) {
+	if s.Rows == nil {
+		s.Rows = current.Rows
+	}
+	if s.Month == nil {
+		s.Month = current.Month
+	}
+	if s.Progress == nil {
+		s.Progress = current.Progress
+	}
+	if s.Total == nil {
+		s.Total = current.Total
+	}
+	if s.Date == nil {
+		s.Date = current.Date
+	}
+	current = s
+	revision++
+	loop.InvalidateAll()
+}

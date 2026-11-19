@@ -1,0 +1,226 @@
+package el
+
+import (
+	"github.com/dyike/keel/gio/op"
+	"github.com/dyike/keel/ui/core"
+	"github.com/dyike/keel/ui/internal/loop"
+	"github.com/dyike/keel/ui/theme"
+	"time"
+)
+
+type viewTimer struct {
+	due          time.Time
+	duration     time.Duration
+	frame        uint64
+	fn           func()
+	owner        string
+	paused       bool
+	fired        bool
+	retain, hold bool
+	remaining    time.Duration
+}
+
+// Now is the frame timestamp. Animations must derive their phase from it.
+func (cx *Context) Now() time.Time {
+	cx.noteRenderTime()
+	return cx.root.e.gtx.Now
+}
+
+// Animating requests the next animation frame without spawning a goroutine.
+func (cx *Context) Animating() {
+	cx.noteRenderTime()
+	if cx.root.e.gtx.Enabled() && !ReducedMotion() {
+		cx.root.e.gtx.Execute(op.InvalidateCmd{})
+	}
+}
+
+// AmbientFrameInterval is the cadence of looping indicators (spinners,
+// indeterminate progress, shimmer, skeleton pulses). Every visible indicator
+// redraws the whole window, so they run below the display rate; transitions,
+// scrolling and input still draw on every display frame.
+const AmbientFrameInterval = time.Second / 30
+
+// AnimatingAmbient requests a frame at the next AmbientFrameInterval tick of
+// wall time. Ticks are aligned, so all ambient indicators share their frames,
+// and a frame already requested sooner (by a transition, say) still wins.
+func (cx *Context) AnimatingAmbient() {
+	cx.noteRenderTime()
+	gtx := cx.root.e.gtx
+	if !gtx.Enabled() || ReducedMotion() {
+		return
+	}
+	now := gtx.Now.UnixNano()
+	step := int64(AmbientFrameInterval)
+	gtx.Execute(op.InvalidateCmd{At: time.Unix(0, now-now%step+step)})
+}
+
+// ReducedMotion returns the application override; platforms without a native
+// preference bridge default to false. Set through theme.SetReducedMotion.
+func ReducedMotion() bool { return theme.ReducedMotion }
+
+// After declares a one-shot timer with a comparable key unique to this root.
+// Declare the key on every Render while the timer is alive; omitting it cancels
+// it. Changing d restarts the timer. A fired timer does not rearm until omitted
+// for a frame. Do not declare timers in Cache builders, which may not run again.
+func (cx *Context) After(key any, d time.Duration, fn func()) {
+	r := cx.root
+	if !r.e.gtx.Enabled() {
+		return
+	}
+	if r.timers == nil {
+		r.timers = map[any]*viewTimer{}
+	}
+	timer := r.timers[key]
+	if timer == nil || timer.duration != d {
+		timer = &viewTimer{due: cx.Now().Add(d), duration: d}
+		r.timers[key] = timer
+	}
+	timer.frame = r.timerEpoch
+	timer.fn = fn
+	timer.owner = ""
+	timer.retain, timer.hold = false, false
+}
+
+// AfterEnabled is After scoped to a visible, enabled element ID. Its full
+// delay restarts after that element or an ancestor is disabled, hidden, or
+// covered by a modal layer. Declare it every Render, like After.
+func (cx *Context) AfterEnabled(id string, key any, d time.Duration, fn func()) {
+	cx.After(key, d, fn)
+	if cx.root.e.gtx.Enabled() {
+		cx.root.timers[key].owner = id
+	}
+}
+
+// Countdown is a one-shot timer scoped to a visible, enabled owner. Pausing,
+// hiding, disabling or covering the owner preserves the remaining delay.
+// Changing d restarts it; omitting the declaration cancels it, like After.
+func (cx *Context) Countdown(id string, key any, d time.Duration, paused bool, fn func()) {
+	cx.After(key, d, fn)
+	if cx.root.e.gtx.Enabled() {
+		timer := cx.root.timers[key]
+		timer.owner = id
+		timer.retain = true
+		timer.hold = paused
+	}
+}
+
+// Poll runs fn every d while the view declares it in each Render, as After,
+// but between frames: fn runs under the frame lock, so it may read and change
+// the view's state, and reports whether it changed what the view shows. Only
+// then do the windows draw. Use it for periodic checks that seldom find a
+// change, such as the system's appearance or a process's state: with After
+// each check draws two frames of the whole window. The key must be
+// comparable and unique within the root; changing d restarts the poll, and
+// a frame that omits it stops it, as does closing the window. Without a
+// window (a screenshot, a test without one) it does not run.
+func (cx *Context) Poll(key any, d time.Duration, fn func() bool) {
+	r := cx.root
+	if r.polls == nil {
+		r.polls = map[any]*viewPoll{}
+	}
+	p := r.polls[key]
+	if p == nil || p.every != d {
+		if p != nil {
+			p.stop()
+		}
+		p = &viewPoll{every: d, win: core.CurrentWindow()}
+		r.polls[key] = p
+		if p.win != nil && d > 0 {
+			p.timer = time.AfterFunc(d, p.tick)
+		}
+	}
+	p.frame = r.timerEpoch
+	p.fn = fn
+}
+
+// viewPoll is a Poll's state. Its fields are guarded by the frame lock.
+type viewPoll struct {
+	every   time.Duration
+	fn      func() bool
+	frame   uint64
+	timer   *time.Timer
+	stopped bool
+	win     core.WindowControls
+}
+
+func (p *viewPoll) tick() {
+	loop.Lock()
+	if closed, ok := p.win.(interface{ Closed() bool }); p.stopped || ok && closed.Closed() {
+		p.stopped = true
+		loop.Unlock()
+		return
+	}
+	changed := p.fn != nil && p.fn()
+	p.timer.Reset(p.every)
+	loop.Unlock()
+	if changed {
+		loop.InvalidateAll()
+	}
+}
+
+// stop ends the poll; called under the frame lock.
+func (p *viewPoll) stop() {
+	p.stopped = true
+	if p.timer != nil {
+		p.timer.Stop()
+	}
+}
+
+func (r *RootWidget) beginTimers() { r.timerEpoch++ }
+func (r *RootWidget) finishTimers() {
+	gtx := r.e.gtx
+	if !gtx.Enabled() {
+		return
+	}
+	for k, p := range r.polls {
+		if p.frame != r.timerEpoch {
+			p.stop()
+			delete(r.polls, k)
+		}
+	}
+	// Collect before invoking callbacks so callbacks cannot mutate this iteration.
+	var due []func()
+	for k, timer := range r.timers {
+		if timer.frame != r.timerEpoch {
+			delete(r.timers, k)
+			continue
+		}
+		if timer.fired {
+			continue
+		}
+		if timer.owner != "" || timer.hold || timer.paused {
+			enabled := timer.owner == ""
+			for _, st := range r.store.states {
+				if st.id == timer.owner && st.enabledFrame == r.store.frame {
+					enabled = true
+					break
+				}
+			}
+			if !enabled || timer.hold {
+				if timer.retain && !timer.paused {
+					timer.remaining = max(0, timer.due.Sub(gtx.Now))
+				}
+				timer.paused = true
+				continue
+			}
+			if timer.paused {
+				remaining := timer.duration
+				if timer.retain {
+					remaining = timer.remaining
+				}
+				timer.paused, timer.fired, timer.due = false, false, gtx.Now.Add(remaining)
+			}
+		}
+		if !gtx.Now.Before(timer.due) {
+			timer.fired = true
+			if timer.fn != nil {
+				due = append(due, timer.fn)
+			}
+		} else {
+			gtx.Execute(op.InvalidateCmd{At: timer.due})
+		}
+	}
+	for _, fn := range due {
+		core.Call(gtx, fn)
+	}
+}

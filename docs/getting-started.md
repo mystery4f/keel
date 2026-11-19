@@ -1,0 +1,231 @@
+# Getting started
+
+English | [简体中文](getting-started.zh-CN.md)
+
+Create an application with the `keel` scaffold, develop its UI in the generated `app.go`, and use the same tool to run and package it.
+
+## Environment
+
+- Go 1.26.1 or newer.
+- macOS: install Xcode Command Line Tools (`xcode-select --install`). Gio uses cgo (`native/` does not); native capabilities require macOS 14+.
+- Windows: install Go. Linux desktop bindings default to purego: ordinary `go build` needs no `-tags purego` or native development headers. Wayland/X11, xkbcommon and GPU shared libraries are still required at runtime. `-tags giocgo` opts into legacy cgo bindings. See [Native APIs](native.md) for platform support.
+
+## Check the environment
+
+Install the CLI, then check the tools required by your system:
+
+```sh
+go install github.com/dyike/keel/cmd/keel@latest
+keel doctor
+```
+
+Releases contain Keel's Gio and go-text, so the installed CLI generates
+projects that build with Keel alone. To try unreleased changes from a Keel
+checkout, run `go build -o /tmp/keel ./cmd/keel` from the repository root,
+then `/tmp/keel new /tmp/my-notes -replace "$PWD"`.
+
+On macOS, `keel doctor` checks Xcode Command Line Tools and `iconutil`. On Linux, it checks window-system and font development packages. The first run or build downloads dependencies. The Linux doctor development-package checks apply to the legacy cgo backend. See [the macOS `-lobjc` warning](troubleshooting.md#-lobjc-warning-when-linking) if it appears during linking.
+
+## Create a project
+
+```sh
+keel new my-notes
+cd my-notes
+keel run
+```
+
+The scaffold generates:
+
+| File | Purpose |
+| --- | --- |
+| `main.go` | Sets the application icon, opens the window, and mounts the UI |
+| `app.go` | Defines the application view and its `Render` method |
+| `app_test.go` | Uses the app in memory with [`windowtest`](testing.md#testing-your-app); `go test ./...` runs it without a window |
+| `keel.json` | Application name, ID, version, and icon used by the packager |
+| `appicon.png` | A square 1024×1024 placeholder image without rounded corners; replace it with your own |
+| `go.mod`, `go.sum` | Requires the selected Keel release, which already contains Keel's Gio and go-text; generation runs `go mod tidy` |
+| `.gitignore`, `README.md`, `README.zh-CN.md` | Project instructions and exclusions for `dist/` and build intermediates |
+
+Options: `-name "My Notes"` sets the display name, which otherwise derives from the directory (`my-notes` → `My Notes`). `-appid com.yourname.notes` sets the application ID, defaulting to `com.example.<directory>`. `-module` sets the Go module path. `-lang zh-CN` writes the generated app's text in Chinese instead of English. `-ci github` adds `.github/workflows/build.yml`, which vets, tests and packages the app on macOS, Windows and Linux, and a `tool` line in `go.mod` so `go tool keel` runs the matching keel command. The example test is written when the project requires the CLI's own Keel release or a local checkout. The destination directory must be empty.
+
+`-keel <version>` selects an exact Keel release (default: the CLI's own, or
+the latest). `-replace <Keel checkout>` instead requires Keel from a local
+checkout, for developing Keel; paths may contain spaces. `-offline` writes files
+without fetching dependencies: an exact `-keel vX.Y.Z` needs no cached metadata,
+while queries such as `latest` need cached resolution. Run `go mod tidy` before
+building; dependencies must then be cached or downloadable.
+
+Keel's copies of Gio and go-text are packages inside the Keel module, so the
+generated `go.mod` has a single requirement and an existing app only needs
+`go get github.com/dyike/keel@<version>`. Ordinary `go build` uses the same
+copies without CLI assistance. Linux uses purego by default; macOS can opt in with `CGO_ENABLED=0` or `-tags purego`. See [implementation evidence](desktop-cgo-free-validation.md) for runtime validation limits.
+
+## Write your first window
+
+Edit `app.go` in the generated project. Keep the scaffold’s `main.go` to manage the icon, window, and event loop. Replace `app.go` with:
+
+```go
+package main
+
+import (
+    "strings"
+
+    "github.com/dyike/keel/ui/el"
+    "github.com/dyike/keel/ui/kit"
+    "github.com/dyike/keel/ui/theme"
+)
+
+type app struct {
+    name   *kit.InputView
+    result string
+}
+
+func newApp() *app {
+    a := &app{
+        name: kit.Input("Your name").Placeholder("e.g. Alex"),
+        result: "Waiting for input",
+    }
+    a.name.OnSubmit(func(string) { a.greet() })
+    return a
+}
+
+func (a *app) greet() {
+    if name := strings.TrimSpace(a.name.Value()); name != "" {
+        a.result = "Hello, " + name + "!"
+    }
+}
+
+func (a *app) Render(cx *el.Context) el.Element {
+    return el.Div().P(24).Gap(12).Items(el.Start).Child(
+        el.Text("My first window").TextSize(22).Bold(),
+        a.name.Render(cx),
+        kit.Button("Say hello", a.greet).Render(cx),
+        el.Text(a.result).TextColor(theme.Muted),
+    )
+}
+```
+
+Save and run `keel run`. Enter a name, then click the button or press Enter to display a greeting. Replace the example labels with your application’s text.
+
+Create stateful components once in `newApp` and retain them in view fields. `Render` builds an element tree from the current state. Event callbacks change the fields; the framework redraws after the callback. See [Elements and views](el.md) for layout and events, and follow the [threading rules](architecture.md#threading) for background updates.
+
+## keel.json
+
+```json
+{
+  "name": "My Notes",
+  "appid": "com.example.mynotes",
+  "version": "0.1.0",
+  "build": 1,
+  "binary": "my-notes",
+  "icon": "appicon.png",
+  "main": ".",
+  "ios": {"minimum_version": "18.0"},
+  "android": {"minimum_sdk": 23, "target_sdk": 35}
+}
+```
+
+- `name` is the display name used by the `.app` bundle, menus, and Linux launcher.
+- `appid` is a unique reverse-domain identifier. macOS uses it for permissions and system notifications; Linux uses it to match desktop icons. **Keep it stable after release.**
+- `version` follows `major.minor.patch`; `build` distinguishes builds of the same version. These values populate macOS Info.plist and Windows executable version information.
+- `binary` names the executable. `main` is the main package path relative to `keel.json`.
+- `macos: {"accessory": true}` starts a menu-bar or launcher app without a Dock icon. Both `keel run` and `keel build` write `LSUIElement` into the bundle; Gio preserves that policy before opening windows. Omit this setting for an ordinary Dock application.
+- `macos.info_plist` and `ios.info_plist` add keys to the generated Info.plist, typically usage descriptions such as `NSLocalNetworkUsageDescription` or `NSCameraUsageDescription`. Values are JSON strings, booleans, numbers (whole numbers become `<integer>`, others `<real>`), arrays and objects; `null` is rejected. Keys keel derives from keel.json (bundle ID, name, executable, versions, minimum OS, icons, `LSUIElement`, the iOS scene manifest) cannot be set here, and `keel build` reports which field controls them. Keys keel only sets as defaults, such as `LSApplicationCategoryType`, `UIDeviceFamily` or the iOS orientations, are replaced.
+
+  ```json
+  "macos": {"info_plist": {"NSLocalNetworkUsageDescription": "Connects to computers on your network."}},
+  "ios": {"info_plist": {"UIDeviceFamily": [2], "NSBonjourServices": ["_rfb._tcp"]}}
+  ```
+
+## Run
+
+Desktop `keel run` watches project files, assets and local `replace`/`go.work` modules by default. Saving rebuilds the app and restarts it only after a successful compilation; build errors leave the current window running until the next edit. Consecutive saves are debounced, and development executables stay in a temporary directory. Before restarting, `keel run` asks the app over a local socket to save its state and run its windows’ `OnClose` callbacks; the new build reopens where you were. Kept without code: window size (and position on macOS), scroll offsets and the text of inputs, except passwords; state returns only to an element of the same role and name at the same place in the tree. Application state survives when `window.Options.KeepState` points to it: its exported fields are JSON-encoded before the reload and decoded into the same pointer by `window.Open`, all or nothing. The scaffold keeps its click count this way. Other in-memory state resets, since the program restarts: Go cannot replace code in a running process. Apps built with a Keel that predates this are restarted as before. Closing the last window or quitting normally (Cmd+Q on macOS) stops the watcher and cancels any pending build without reopening the app. Application crashes keep the watcher alive for the next edit. Press Ctrl+C to stop, or use `keel run -watch=false` to disable watching.
+
+`keel run` passes `appid` to Gio and uses the icon configured in `keel.json`, honoring `icon_mask` and platform overrides under `icons`. macOS runs a signed temporary application bundle. Windows embeds the same PerMonitorV2 DPI manifest, Common Controls 6, long-path support, icons and version metadata as `keel build`, then starts a GUI executable. Both watching and `-watch=false` use this packaging; temporary Windows resource objects are removed after compilation. Explicit `window.SetIcon` calls take precedence. Wayland has separate requirements; see [Application icons](app.md#app-icons). Use `keel run -- --flag` to pass arguments to your application.
+
+Use `keel run -target ios` to build, install and launch on an iOS simulator; `-simulator <UDID>` selects the device. Check the environment with `keel doctor -target ios`. See [iOS](ios.md).
+
+Use `keel run -target android` to install and launch; select a device with `-serial <serial>` when several are connected. Check the toolchain with `keel doctor -target android`. See [Mobile support](mobile.md).
+
+## Package
+
+```sh
+keel build                    # Current platform
+keel build -target windows    # Build a Windows package on any platform
+keel build -target js         # WebAssembly
+keel build -target ios        # macOS + full Xcode; simulator .app
+keel build -target android    # Android SDK + NDK + JDK; development APK
+keel build -n                 # Print commands without executing them
+```
+
+Output goes to `dist/`; change it with `-o`. Builds strip symbols, debug information, and local paths by default (`-s -w -trimpath`), reducing size by about a quarter. Crash traces still show function names. Add `-debug` when using a debugger. Android native libraries are always stripped by gogio; see [Android](android.md). Syntax highlighting and network images each add about 4 MB and are optional: uncomment their imports in the generated `main.go` when needed. See [Optional features and binary size](kit.md#optional-features-and-binary-size). macOS, Android and browser packaging use Keel's built-in copy of Gio's packager, gogio, so nothing extra is downloaded.
+
+| Target | Output | Icon | Build host |
+| --- | --- | --- | --- |
+| `darwin` | `dist/My Notes.app` | Generates `icon.icns` inside the bundle | macOS with cgo and `iconutil` |
+| `windows` | `dist/my-notes.exe` and `my-notes.ico` | Embeds 14 icon sizes in the executable | Any platform; no cgo required |
+| `linux` | `dist/linux/`: executable, `<appid>.desktop`, icons, and `install.sh` | Uses the hicolor icon theme | Linux with Wayland/X11 development headers |
+| `ios` | `dist/ios/my-notes.app`; `-device` produces a signed `.ipa` | iPhone/iPad assets | macOS with full Xcode |
+| `android` | `dist/android/my-notes.apk` | Density variants and adaptive icon | Android SDK, NDK and JDK |
+| `js` | `dist/web/` | — | Any platform |
+
+**macOS:** `-arch arm64,amd64` creates a universal bundle; the default uses the host architecture. The CLI rewrites Info.plist with the application type, name, version, and minimum macOS version (14), then signs the entire bundle. Without a signing identity, it uses an ad hoc signature for local use. For distribution, sign with `-sign "Developer ID Application: Your Name (TEAMID)"`, then notarize with `xcrun notarytool`.
+
+**Windows:** the default is `-arch amd64`. `-arch amd64,arm64` creates one executable per architecture. Temporary `.syso` resource files are removed after compilation.
+
+**Linux:** the build embeds `appid` as Wayland’s app_id and X11’s WM_CLASS. The desktop environment uses it to match the window to `<appid>.desktop` and its icon. `dist/linux/install.sh` installs under `~/.local` by default. Use `PREFIX=/usr/local sudo ./install.sh` for a system installation.
+
+## Icons
+
+`appicon.png` is the **source image**: a square 1024×1024 PNG with artwork filling the canvas. Do not add platform corners, borders, or shadows yourself. `keel build` applies each platform’s shape:
+
+| Platform | Canvas | Artwork | Corners | Other treatment | Reference |
+| --- | --- | --- | --- | --- | --- |
+| macOS | 1024 | 824×824, centered with 100 padding | 185.4, continuous curvature rather than circular arcs | Shadow: 12 down, blur 28, black at 50% | Apple macOS app icon template |
+| Windows | 48 grid | 42×42, centered | 2 | Transparent background, no shadow; embeds 16, 20, 24, 30, 32, 36, 40, 48, 60, 64, 72, 80, 96, and 256 sizes | Microsoft app icon design and construction guidelines |
+| Linux | 128 | 104×104, centered with 12 padding | 8 | No shadow; exports eight hicolor sizes from 16 to 512 | GNOME app icon template |
+
+Each size is rendered directly from the source image rather than downscaled from a larger output, keeping small 16 and 24 icons clear.
+
+Preview before packaging: `keel icon` writes all platforms’ icons to `dist/icons/`: `android.png`, `ios.png`, `macos.png`, `windows.ico`, `windows/<size>.png`, and `linux/<size>.png`.
+
+iOS uses full-bleed artwork with system rounding and transparency flattened over white; `icon_mask` does not affect iOS. Use `icons.ios` for separate artwork.
+
+Configure exceptions in `keel.json`:
+
+- For artwork with its own transparent silhouette, such as a circular logo, set `"icon_mask": "none"`. The tool scales it to each platform’s artwork area while retaining its outline and transparency.
+- For finished platform icons, set `"icons": {"darwin": "icon-mac.png", "windows": "icon-win.png", "linux": "icon-linux.png"}`. These square PNGs are only resized; other platforms use normal generation.
+
+For Windows, `keel build` embeds the icon, manifest (PerMonitorV2 DPI awareness, Common Controls 6, and long paths), and version metadata (product name, description, and version), then compiles with `go build -H=windowsgui`. It also saves `dist/<binary>.ico` for installers and shortcuts. Other `.syso` files in the main package cause an error to prevent resource conflicts.
+
+## Develop against local Keel
+
+To test framework changes in an application, create a scaffolded project and point `-replace` to your local checkout:
+
+```sh
+keel new my-app -replace ../keel
+cd my-app
+keel run
+```
+
+The scaffold adds a local replacement to the application’s `go.mod`. In an existing project, run `go mod edit -replace=github.com/dyike/keel=../keel` followed by `go mod tidy`.
+
+## Keel's copy of Gio
+
+Keel draws with its own copies of Gio and go-text in the root-level `gio/` and `typesetting/` directories, with fixes and speedups that cannot wait for upstream releases (lower memory, faster frames; [third_party/README.md](../third_party/README.md) lists them). They are ordinary packages of the Keel module, so every app that requires Keel builds with them; no `replace` is needed.
+
+Code that uses Gio or go-text directly imports them under Keel's path:
+
+| Upstream import | Import with Keel |
+| --- | --- |
+| `gioui.org/...` | `github.com/dyike/keel/gio/...` |
+| `github.com/go-text/typesetting/...` | `github.com/dyike/keel/typesetting/...` |
+
+`gioui.org/shader` stays upstream. Mixing the two paths does not compile: a `Layout(gioui.org/layout.Context)` method is not a Keel view, because the types differ. See [One module](single-module.md).
+
+## Next steps
+
+- [Components](kit.md): find components by purpose, try live examples, and inspect their source.
+- [Elements and views](el.md): layout, state, events, focus, and overlays.
+- [Windows](app.md): multiple windows, shortcuts, and screenshots.
+- [WebAssembly](web.md): build WebAssembly with `keel build -target js`.

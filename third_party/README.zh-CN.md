@@ -1,0 +1,392 @@
+# third_party
+
+[English](README.md) | 简体中文
+
+Keel 自带它绘制界面所用的库的副本，这样可以直接修复和优化，不必等上游发版。源码位于根级 gio/ 和 typesetting/ 目录，本目录保存来源与补丁记录。副本是 Keel 模块里的普通包，没有自己的 `go.mod`，以 Keel 的路径导入：
+
+| 上游导入前缀 | Keel 导入前缀 |
+| --- | --- |
+| `gioui.org`（Gio 根模块） | `github.com/dyike/keel/gio` |
+| `github.com/go-text/typesetting` | `github.com/dyike/keel/typesetting` |
+
+| 目录（相对仓库根目录） | 上游 | 基线 | 许可 |
+| --- | --- | --- | --- |
+| `gio/` | [Gio](https://gioui.org) `gioui.org` | v0.10.3 | Unlicense 或 MIT（`gio/LICENSE`） |
+| `typesetting/` | [go-text](https://github.com/go-text/typesetting) `github.com/go-text/typesetting` | v0.3.5 | Unlicense 或 BSD-3-Clause（`typesetting/LICENSE`） |
+| `internal/gogio/` | Gio 打包器 `gioui.org/cmd/gogio` | v0.10.0 | Unlicense 或 MIT（`internal/gogio/LICENSE`） |
+
+`gioui.org/shader`（含 `gioui.org/shader/gio`）是独立模块，仍用上游。
+
+两个副本随 Keel 的模块压缩包发布、共用 Keel 的版本，所以任何 require `github.com/dyike/keel` 的应用都会用上它们，不需要 `replace`。改导入路径会改变 Go 类型身份：与 Keel 一起直接使用上游 `gioui.org/...` 或 go-text 类型的应用或组件，需要改用上表的前缀（见 [docs/single-module.zh-CN.md](../docs/single-module.zh-CN.md)）。
+
+## 规则
+
+- 这两个目录保持上游风格；只改 Keel 需要的，不做纯格式修改。每处修改都记在下面并写明原因，换到更新的上游时照着重做。
+- 副本是基础库，不是 Keel 模块：Gio 只导入自身和 typesetting，typesetting 只导入自身，二者都不导入 Keel 其他包或上游 Gio/go-text（`internal/deps` 检查）。
+- 不复制上游的测试和测试数据。补丁自带测试，放在补丁旁边；在根目录运行（`go test ./gio/... ./typesetting/...`）。
+- 升级上游：复制发布版本，去掉 `go.mod`、`go.sum`、`*_test.go` 和 `testdata`，改写两个导入前缀（不动 `gioui.org/shader`），再重做下面的补丁。
+
+## 补丁
+
+- Android 输入法冷启动：保留显式显示请求，等 Activity 恢复且窗口取得焦点后，
+  在焦点分发结束后的消息中调用 IMM。窗口焦点不再仅由 `onResume` 决定。
+  请求待处理时声明 Surface 为文本编辑器，避免 Android 初始焦点策略隐藏输入法。
+  隐藏和注销时取消待处理任务，不轮询、不强制显示。
+  模拟器回归：`python3 scripts/check-android-ime.py --device emulator-5554`
+  （API 30+、arm64，启用连接硬件键盘时显示软键盘）。附加
+  `--view-ref v0.4.10 --expect-blocked` 可验证旧代码的启动失败。
+  真机及 API 30 以下系统尚未验证。
+
+- Wayland purego：通过共享 dispatcher 和原生内存中的协议元数据实现
+  fractional-scale-v1 与 viewporter，并保留整数缩放回退。度量、缓冲区
+  舍入、输入/输入法坐标和滚动距离使用实际渲染比例；光标热点仍使用光标
+  缓冲区自己的整数比例。显式提交 xdg 逻辑几何，修复 Hyprland 启动时
+  缩到最小尺寸；程序 resize 刷新 GPU surface，帧合并保留待处理的刷新
+  标记，避免旧缓冲区继续使用。无边框窗口不再累加备用标题栏高度。xdg-shell v4 边界
+  （或保守的输出尺寸估计）支持初始尺寸选择。测试覆盖度量/舍入、标题栏
+  高度及原生 resize、滚动、重新打开。协议定义来自 wayland-protocols 的
+  staging/fractional-scale 和 stable/viewporter（MIT）；没有新增 cgo 绑定。
+
+- Linux 桌面绑定现在默认使用 purego，即使开启 CGO 也无需指定标签或安装
+  原生开发头文件。`-tags giocgo` 可选择旧 cgo 绑定；`purego` 或 CGO_ENABLED=0
+  优先。Android、BSD 和 macOS 的选择规则不变。源码选择回归测试覆盖
+  amd64/arm64 及覆盖标签的组合。
+
+- `gio/app`，Wayland：GNOME 的 text-scaling-factor 仅作用于 sp，不再放大 dp。
+  输出缩放继续控制窗口几何与缓冲区密度，避免文字辅助缩放连带放大标题栏、
+  图标和最小窗口尺寸。测试覆盖布局/文字缩放分离及非法设置。
+
+
+- `gio/text`：按估算字节数限制段落排版缓存，常规预算 8 MiB，最近八个显式帧
+  使用的排版可保留至 64 MiB，同时维持 1,000 条上限。短段落复制自己的字符串，
+  避免通过子串保留整个输入文档。`Shaper.BeginFrame` 保护可见工作集；未调用
+  它的使用方仍采用常规预算。测试覆盖字节与条数上限、超大段落、字符串所有权
+  和工作集复用。借鉴 MyGo 的字节预算思路，排版输出保持不变。
+- `gio/text`，macOS：保留稳定的字体身份，超过 512 个未固定的 CoreText 字体
+  对象时回收最近未使用者。复制的描述符必须先证明能恢复出 `CFEqual` 的字体，
+  无法精确恢复的身份继续固定保留。旧字形编号按需恢复原字体。原有
+  `GlyphNativeFont` 返回的对象继续保留到 shaper 销毁，以兼容生命周期约定；
+  theme 的同步栅格化改用 `BorrowGlyphNativeFont`。描述符、字体编号元数据、
+  既有的 256 条主字体缓存和固定字体不计入 512 个对象的预算，因此这不是全部
+  原生内存的上限。回收、旧接口和像素测试覆盖旧字形、中文、可变样式与 Emoji。
+
+- `gio/app`：macOS、Windows 的窗口构建不再包含备用标题栏的 Material 组件和
+  文本排版器。AppKit、Win32 直接实现窗口装饰选项；其他平台保留原有备用标题栏、
+  高度测量、动作及最大化状态。原生和备用装饰状态测试、依赖检查覆盖这一拆分。
+- `gio/gpu`：`noopengl` 同时排除 OpenGL 注册导入及 EGL/WebGL 无窗口上下文。此前该标签只移除窗口上下文，
+  GPU 初始化仍会保留后端。带标签的测试验证请求 OpenGL 返回后端不可用错误，
+  其他后端维持原行为。
+
+- `gio/app`：交付帧时重新允许请求重绘，使布局期间到达的外部更新能请求下一帧。此前必须等事件队列排空才重新允许请求，这段时间的请求会丢失。`TestInvalidateDuringFrame` 复现该问题，并检查重复请求仍会合并。
+
+- `gio/internal/ops`：写入操作时，数据缓冲区有余量就原地扩展，不再用 `append(o.data, make([]byte, n)...)`。编译器只在普通构建中把这种写法变成原地扩展；在 `-race` 下每次写入都会分配临时切片，组件画廊的分配上限因此超标（label 每帧 40 次，普通构建 26 次），`go test -race ./...` 失败。普通构建不变：分配次数相同，操作写入和画廊帧耗时都在噪声范围内。测试检查一帧操作写入不分配内存且返回清零的字节；在 `-race` 下去掉补丁时失败。
+
+- `gio/io/input`、`gio/app`：`Router.FocusSemantic(id)` 把键盘焦点交给一个语义节点，即它自己的可聚焦处理器或其内部最近的一个（例如输入框的编辑器）；`Window.QueueFocus(id)` 可以从任意协程调用，在驱动线程上于下一个事件之前完成。无障碍客户端借此把焦点移到它按节点认识的元素上。`QueueInput` 和 `QueueFocus` 在协程里唤醒窗口：在 macOS 主线程的原生回调里，`Invalidate` 会内联运行 Gio。测试按 ID 聚焦节点（其中一个通过内部区域），拒绝未知 ID，并在竞态检测下从另一个协程排队焦点。
+
+- `gio/io/input`：`SemanticDesc.Focused` 标出持有键盘焦点的节点，即区域包含获得焦点的处理器区域的最内层节点，供平台无障碍桥报告焦点。另外，处理器的手势不再让一个自我描述的区域失去语义：上游把区域的语义设为“处理器是否接受点击或滚动”，于是带类别和标签、但处理器只接受键盘焦点的节点会从树中消失。测试依次聚焦两个按钮（其中一个通过没有语义的内部区域），检查标记；去掉任一改动都会失败。
+
+- `gio/app`：`Window.ObserveSemantics(fn)` 在驱动线程上处理完每一帧后调用 fn，传入这一帧的语义树和尺寸，此时没有其他代码读取窗口的输入状态；`Window.QueueInput` 从任意协程接收输入，在驱动线程上于下一个事件之前投递。在 Windows 上，UI Automation 在它自己的线程上调用提供者，而 Gio 的路由器属于窗口线程；Keel 的桥从观察者回调里复制元素，并把按下转成排队的输入（Linux 的桥也这样排队输入）。测试观察一帧，从另一个协程排队一次点击，并在竞态检测下确认处理器收到。
+
+- `gio/io/input`：语义 ID 跟随节点。有输入处理器的节点沿用其处理器标签上次的 ID，标签或状态变化时（复选框切换、“保存”变成“已保存”）不变。其他节点按表达的内容（类别、标签、描述、状态）匹配，不含处理器，因此 Keel 在视野外不带处理器描述的行，滚进视野、获得处理器后 ID 不变。内容相同的节点按顺序得到不同的 ID，同一帧内不会重复分配。只有分配过 ID 的帧之后才会遗忘旧 ID：上游在某帧没有调用 `AppendSemantics` 时会全部丢弃。这些情况下读屏软件都不会丢失位置。测试覆盖每种情况，去掉补丁时失败。
+
+- `gio/app`：`Window.AppendSemantics` 返回最近一帧的语义树，`Window.ProcessInput` 像平台上报一样投递一个事件，两者都在驱动线程调用。Keel 的平台无障碍桥（`ui/window`）在原生回调里用这棵树回答读屏软件的询问，并把它的“按下”转成一次点击。测试在树中找到一个按钮并按下它。
+
+- `gio/io/input`：`Source.Pending` 报告路由器是否还有留给下一帧的事件或命令（上一帧之后到达的输入、上一帧产生的事件、排队的命令）。Keel 的 `ui/el` 只在没有待处理项时，才用保留的元素树重绘一帧。测试分别在输入之前、输入等待中以及静止帧送达输入之后检查它。
+
+- `gio/internal/vk`：`vulkan_purego.go`（及 `vulkan_x11_purego.go`、`vulkan_wayland_purego.go`）在 Linux 上不使用 cgo 实现 vk 的 API：运行时加载 libvulkan，所有函数都通过函数指针以整数、句柄和指针参数调用。Vulkan 结构体和常量由 `cgo -godefs` 从 Vulkan-Headers v1.3.275 生成到 `vulkan_types.go` 和 `vulkan_consts.go`（amd64 与 arm64 完全一致），字段名按头文件恢复为 C 的名字，因此 vulkan.go 的 Go 代码得以复用，只替换其中的 C 类型和辅助函数；88 个 C 辅助函数改为生成的 Go 函数。`vulkan_layout_cgo.go` 在 cgo 构建中对照已安装的头文件检查所有字段偏移、结构体大小和 157 个常量。新的无头测试在两种绑定下都经 Vulkan 备用上下文渲染（CI 中为 lavapipe）。
+
+- `gio/app`（Wayland）：`os_wayland.go` 保留 Gio 的 Wayland 窗口逻辑，改为操作不透明的 proxy 指针；请求在 `wayland_requests.go` 中用 `wl_proxy_marshal_array_flags` 编组（wayland-scanner 的内联函数用的是 `wl_proxy_marshal_flags`），事件交给共用的 `wlOn*` 处理函数。`os_wayland_cgo.go` 保留 Gio 的监听表（os_wayland.c）和生成的协议代码，配以 `//export` 转接函数，并在初始化时对照头文件检查每个操作码、协议常量和光标结构体。`os_wayland_purego.go` 不使用 cgo 加载 libwayland-client 和 libwayland-cursor，按 `wayland_protocols_purego.go`（由 scanner 代码生成）在 C 内存中构建 xdg-shell、xdg-decoration 和 text-input 接口，并用一个 `wl_proxy_add_dispatcher` 回调分发所有 proxy 的事件。`egl_wayland_purego.go` 加载 libwayland-egl。
+
+- `gio/app`（X11）：`os_x11.go` 保留 Gio 的 X11 窗口逻辑，改为操作自己定义的 X 结构体（Window、Atom、Time 用 uintptr，C long 用 int）；`os_x11_cgo.go` 保留经 cgo 调用的 Xlib，并在初始化时对照头文件检查每个字段偏移、结构体大小和常量；`os_x11_purego.go` 不使用 cgo 加载 libX11、libX11-xcb、libXcursor、libXfixes 和 libxkbcommon-x11。Linux 上 Wayland 和 Vulkan 文件暂时只用 cgo。Perform 和 Configure 末尾调用 XFlush：它们原先在事件循环之外运行，而事件循环阻塞在 poll 上，Xlib 一直缓存着它们发出的请求（关闭、置前或调整大小）。此前在 Xvfb 下，resident 和 reopen 真实窗口测试在两种绑定下都会超时，raise 偶尔死锁；修复后整套测试在两种绑定、amd64 和 arm64 上都通过。现在 `Run` 把它们排队到事件循环执行（见下文），XFlush 让请求立即发出，而不是等事件循环下一次调用 XPending。
+
+- `gio/app/internal/xkb`：按键分发逻辑和 keysym 表移入 `xkb.go`，操作 libxkbcommon 的不透明指针；`xkb_cgo.go` 保留 cgo 调用（并对照头文件检查 keysym 和枚举值），`xkb_purego_linux.go` 不使用 cgo 加载 `libxkbcommon.so.0`。测试在两种绑定下编译默认键位表，检查 KEY_A 的 keysym、文本、Shift 和按键重复。
+
+- `gio/internal/egl`：在 Linux 桌面上，`CGO_ENABLED=0` 或 `-tags purego` 时 `egl_purego_linux.go` 通过 purego 加载 libEGL，句柄与 `egl_windows.go` 一样使用 uintptr；`egl_unix.go` 仍是 cgo 默认实现，也是 Android 和 BSD 的唯一绑定。EGLBoolean 返回值只取低 32 位。`gio/gpu/headless` 新增在所有平台运行的像素测试（设置 `GIO_HEADLESS_REQUIRED=1` 时无法创建上下文即失败而非跳过）；`gio/gpu` 中使用 `AddTinted` 的测试移入 `!nometal` 的 darwin 文件，使该包的测试能在 Linux 和 `nometal` 下构建。
+
+- `gio/app`（macOS）：在 `CGO_ENABLED=0` 或 `-tags purego` 时，purego 绑定取代 `os_macos.m`、`os_darwin.m`、cgo 辅助函数以及 Metal 和 OpenGL 窗口上下文；cgo 文件仍是默认实现，iOS 不变。`os_macos.go` 保留 Gio 的窗口逻辑，改为操作普通句柄，由两种绑定共用；`displaylink_darwin.go` 存放 display link 状态机。`os_macos_purego.go` 以相同的名称、方法和关联对象注册 `GioView`、`GioWindowDelegate`、`GioAppDelegate` 和 `AppListener`（Keel 通过 `gioInputView` 和类名找到输入视图）；视图通过以视图指针为键的映射找到所属窗口。super 调用指定实现方法的类，而不是对象的动态类。`NSTextInputClient` 方法经 purego 回调以结构体形式收发 `NSRange`、`NSRect` 和 `NSPoint`；浮点和结构体消息使用只注册一次的包装函数（amd64 上用 `objc_msgSend_stret`）。`runOnMain` 通过一个 `dispatch_async_f` 回调投递令牌，display link 使用一个 `CVDisplayLink` 回调。`os_macos_cgo.go` 对照 SDK 检查 AppKit 常量。新测试在两种绑定下经 `objc_msgSend` 驱动标记文本、提交、取消、代理对范围、子串和光标矩形；去掉协议或改动返回范围时测试失败。nometal 测试打开并缩放一个 OpenGL 窗口。
+
+- `gio/gpu/headless`：`headless_purego_darwin.go` 在 macOS 上不使用 cgo（`CGO_ENABLED=0` 或 `-tags purego`）创建 Metal 设备和命令队列，与 cgo 辅助函数一样在锁定线程的自动释放池中完成；iOS 仍使用 `headless_darwin.go`。测试在每种绑定下检查队列属于返回的设备，两者交换时失败。配合 purego Metal 后端，`CGO_ENABLED=0 go test ./gio/gpu/...` 在 macOS 上通过。
+
+- `gio/gpu/internal/metal`：新增 purego 绑定 `metal_purego_darwin.go`，在 macOS 上不使用 cgo 发送后端的 Metal 消息，通过 `CGO_ENABLED=0` 或 `-tags purego` 选用；`metal_cgo_darwin.go` 保留 Gio 的 Objective-C 辅助函数，仍是 cgo 默认实现，也是 iOS 的唯一绑定。后端的 Go 逻辑改为操作普通句柄，由两种绑定共用。`purego.SyscallN` 会分配参数切片，因此编码器调用在互斥锁下复用同一个参数数组；会阻塞或指向局部变量的调用直接使用 `SyscallN`。arm64 把 `MTLOrigin`、`MTLSize` 和 `MTLViewport` 以指向副本的指针传递，amd64 通过 `RegisterFunc` 放在栈上传递。一帧会在三种清屏色之间切换，而设置清屏色需要一次反射调用，所以按清屏色保留渲染通道描述符。cgo 文件对照 SDK 检查各枚举值。测试在两种绑定下覆盖 `NSError` 报错和计算调度；交换两个尺寸参数时调度测试会失败。无头、绘制和真实窗口测试在两种绑定下均通过。
+
+- `gio/internal/cocoainit`：`cocoa_purego_darwin.go` 不使用 cgo（`CGO_ENABLED=0` 或 `-tags purego`）启动让 Cocoa 进入多线程模式的 NSThread，并像 ARC 那样释放 `new` 返回的引用；iOS 仍使用 cgo 文件。测试在两种绑定下检查 `+[NSThread isMultiThreaded]`，线程未启动时失败。
+
+- `gio/internal/gl`：新增 purego 绑定 `gl_purego_unix.go`，不使用 cgo 即可在 macOS 上加载 OpenGL、在 Linux 上加载 OpenGL ES，通过 `CGO_ENABLED=0` 或 `-tags purego` 选用；`gl_unix.go` 仍是 cgo 默认实现，也是 iOS、Android 和 BSD 的唯一绑定。它逐个翻译 cgo 绑定的全部方法，包括两个改写签名的跳板（`glGetVertexAttribPointerv` 返回输出参数，缺少 `glInvalidateFramebuffer` 时跳过）以及上游 `Flush` 实际调用 `glFinish` 的行为。整数和指针调用通过带 `go:uintptrescapes` 的辅助函数按地址调用；六个浮点调用使用 `RegisterFunc`。`GLint`、`GLuint` 和 `GLboolean` 返回值先截断再扩展，因此值为 `-1` 的 uniform 位置不会出错。测试加载全部符号并检查 C 字符串辅助函数；在 macOS 上使用 `-tags "nometal purego"` 时无头测试通过，渲染经由该绑定完成。
+
+- `gio/gpu/internal/metal`：统一内存的 macOS 和 iOS 设备上，不可变顶点缓冲现在
+  复用已有的、有上限的 2 的幂 Metal 缓冲池。大路径原来绕过缓冲池，每次缓存
+  未命中都调用 `newBuffer`，旋转加载指示器因此每帧都会新建缓冲。共享存储和
+  私有存储使用不同的池键；只有 `BeginFrame` 等待上一条命令缓冲完成后，已释放
+  存储才可复用，`Trim` 仍会释放池。渲染器继续为每条路径保留独立缓冲，顶点、
+  覆盖率、裁剪和透明度计算均不变。没有仅按局部路径几何复用 GPU 顶点，因为
+  曲线细分、x 单调拆分、边界和轮廓 `MaxY` 都在非平移变换之后计算。原生测试
+  验证共享缓冲须经完成栅栏才能复用，并把连续 24 帧旋转路径与每帧清空缓冲池、
+  路径缓存的渲染器逐字节比较；整帧 benchmark 覆盖持续旋转。
+- `gio/op/paint`、`gio/gpu`、`gio/internal/ops`：`ImageOp.PaintQuads`（Metal 构建另有 `PaintTintedQuads`）把同一张图片按多个偏移绘制、每处裁剪到图片中的一个矩形，编码成一个 `TypeImageQuads` 操作，quad 数据放在随后的 Aux 操作里。它取代每个 quad 的偏移、矩形裁剪、画刷和绘制共七个操作；输入路由和 GPU 收集每帧都要把它们各解码一遍。Keel 的 CoreText 字形图集把同一页上连续的字形遮罩这样绘制；典型一帧里文字约占四分之三的操作。整数平移下，收集阶段直接把每个 quad 变成图片操作，边界、裁剪交集、材质和矩形裁剪父节点与分开的操作完全一致。其他变换（小数偏移、缩放、旋转）回放分开的操作；所有 quad 共用一个操作键，所以变换后的裁剪路径按内容作键。纯色和空图片始终使用分开的操作，绘制后图片仍是当前画刷。无头测试在偏移、小数偏移、缩放、旋转、矩形与圆角裁剪、嵌套不透明度和后续绘制下逐字节比较像素；在 Apple M4 上绘制 3200 个字形 quad 的基准从每帧 0.99 ms 降到 0.52 ms。
+
+- `gio/app`：macOS 输入视图为安装材质包装而临时脱离窗口时，驱动操作仍能找到原窗口；窗口关闭时清除不持有对象的反向引用。视图重新挂载不再误报窗口失焦，为非活动窗口指定响应者也不会提前报告键盘焦点。Raise 直接请求 NSApplication 激活，不再依赖可能滞后的 NSRunningApplication 状态。Void 的原生回归覆盖输入、Cmd+, 和应用处于后台时的连续重新唤起。共享事件循环在投递 DestroyEvent 后停止发送事件，避免延迟到达的原生唤醒等待已经退出的接收者而阻塞主线程；通道回归测试覆盖此终止状态。
+
+- `gio/app`：窗口通过 Objective-C 关联对象保留原始 Gio 输入视图，原生回调不再把
+  `contentView` 强转为 GioView。AppKit 模糊层可直接作为窗口根视图，Gio 在内部
+  绘制透明内容。原生包装视图回归覆盖焦点、缩放和关闭；
+  `ui/window/testdata/glass` 验证三种玻璃样式的根视图、命中测试、最小化恢复和销毁。
+
+- `gio/app`：macOS 启动时遵循应用包的 `LSUIElement` 标记，不再强制切换成普通 Dock 应用。常驻启动器打开首个窗口后无需再次切换模式，避免切换造成失焦。原生应用包回归测试覆盖普通模式和常驻模式。
+
+- `typesetting/shaping`：平台可在空白裁剪前、追加截断符后提供视觉顺序，覆盖
+  单行快速路径和换行路径。CoreText 已解析的嵌套双向顺序不再由简单方向标志重算。
+  独立 CTLine 对照检查 LTR/RTL 下阿拉伯文、希伯来文、数字、中文、组合字符和
+  emoji 的字体、字形与位置；扣除 Gio 对齐偏移后误差不超过 1/64 像素。
+
+- `gio/text`、`gio/font/opentype`、`ui/theme`：macOS 平台 shaper 使用
+  CoreText 匹配、回退和排版。栅格化直接借用排版得到的 CTFont，不再按路径重开。
+  字体准备只校验必需表、读取元数据，不保留第二份 Go 字形和 AAT 表；Go 回退
+  首次使用时再解析。原生字体源描述符通过有上限的弱缓存在 shaper 间共享，
+  字重、字号、实例身份和可变 scratch 仍独立。不透明字体、自定义变体坐标以及
+  `NoSystemFonts` 保留 Go 路径。初始化后释放 collection 包装，旧版文件字体调用方
+  也不会由 shaper 保留闲置 Go 字体。`typesetting/font.Validate` 与 NewFont
+  共用必需表校验，保留无效字体的报错规则。
+- `gio/op/paint`、`gio/gpu`、Metal、`ui/theme`：普通字形页改存每像素一个线性覆盖
+  字节；统一内存 Metal 使用通道重映射的 R8 纹理及单通道 mip。设备不支持、
+  分配失败、着色和透明度层回退均保持原来的 sRGB RGBA 表示。跨帧、多窗口的
+  GPU 读取仍靠不可变页和写时复制保护。活跃 CPU 图集页容量由 32 MiB 降至 8 MiB；
+  彩色图片及图集外标记另有 2 MiB、512 项 LRU，弱引用键允许关闭窗口后回收字体。
+  测试覆盖字体源所有权、旧版文件字体、内存字体、自定义字体回退、精确字体身份、
+  多语言簇、换行截断、缓存上限与生命周期、上传顺序和缩放/裁剪/着色/透明度像素。
+  `testdata/textcache` 以两个真实窗口验证 12 次字形、字号、裁剪、透明度更新和缩放。
+  `BenchmarkSystemFontShaping` 只测 Go 分配；本机 Apple M5 Pro 上，256px 页含全部
+  mip 的 Metal 实际分配为 R8 98,304 字节、RGBA 360,448 字节。这些改动包含在
+  Keel v0.3.2 中。
+
+- `gio/gpu`：限制稀疏覆盖页的扩张。宽扁的圆角边带和高窄的边框不再撑大
+  同一张大部分为空的图集：面积扩张超过 256 Ki 像素、且占用不足四分之一时
+  新开一页。小型、密集掩码仍沿用原有打包。路径、裁剪、绘制顺序、分辨率和
+  窗口表面同步均保持原样。测试覆盖稀疏/密集打包、边界、重叠和重置。Rex
+  在 4000×2200 原生窗口的分配追踪中，R16 覆盖纹理从 20.55 降至 2.77 MiB。
+  这是本地补丁的分配结果，不能当作多轮总内存或帧率结果。
+
+- `typesetting/fontscan`：磁盘索引解码时就复用相同字符覆盖表，不再先分配重复切片。每次读取使用独立哈希表筛选候选，再完整比较页号和位图以防碰撞；缓存独占解码后的数据，不引用复用的输入记录。版本 7 格式不变，命名实例和其他字体元数据仍独立。测试覆盖记录所有权、碰撞、截断、解码隔离和零分配命中。
+- `gio/widget`、`gio/widget/material`：内部按“颜色值 + 是否设置”传递标签颜色，新增 `Label.LayoutWithColor`，保留原结构体和颜色指针方法。可选中文本将颜色保存在选择状态里，不再引用临时 LabelStyle。测试覆盖透明色、旧指针、文本选择和跨次布局的所有权；普通 Material 标签预热后零分配。
+- `gio/gpu`：路径坐标系描边只在连续两帧出现后准入缓存。定长候选表只保存哈希，不复制缩放时只出现一帧的路径；碰撞可能阻止准入，但不会复用错误几何。正式缓存仍独占路径和曲线，保留完整字节校验、淘汰规则，以及 1 MiB、128 项上限。测试覆盖稳定准入、变化路径分配、间隔帧和仿射像素。
+
+- `typesetting/font`：初始化时校验 TrueType 轮廓并收集可变字体点数，不再先为所有轮廓分配点数组后丢弃。完整轮廓仍按需解码，沿用共享缓存的锁。测试对照旧解析器的字形头、点数、轮廓和度量；模糊测试检查畸形记录的校验结果。
+- `typesetting/fontscan`：文件路径和修改时间未变时不再重写磁盘索引；更新时逐文件流式编码，读取时复用定长记录缓冲，避免 `bytes.Buffer` 为探测记录 EOF 扩容。版本 7 格式、字体身份和回退有效性检查不变。测试覆盖失效、格式兼容、缓冲复用和截断记录。不改变 GC 策略。
+- `gio/gpu`、`gio/internal/stroke`：在路径坐标系中缓存描边轮廓，再执行原有仿射变换和顶点分割。旋转不再重建相同轮廓；线宽或路径内容变化仍单独计算，命中时比较完整输入以防哈希碰撞。缓存独占数据，未使用一帧后淘汰，最多 128 项、1 MiB；超大路径不缓存，渲染器清理和释放时丢弃全部缓存。描边 scratch 的底层数组互相独立，可复用并丢弃超大数组，减少动态路径未命中的分配。测试逐字节对照旧算法的曲线和仿射顶点，覆盖所有权、淘汰、分配上限，以及旋转、嵌套圆角裁剪和透明度下的冷热 GPU 像素。不改变着色器或 GC。
+
+- `gio/widget.Icon`：按尺寸、颜色保留最多八张不可变图片，使用 LRU 淘汰，
+  每个图标的像素预算为 1 MiB。超大图片和原来一样只保留自身。
+  交替使用不同样式不再反复栅格化或更换纹理身份；测试覆盖预热后零分配命中、
+  淘汰顺序和引用释放。
+- `gio/text`、`gio/widget`：标签和编辑器绘制从 shaper 借用一个 32 字形的临时缓冲。
+  CoreText 显式接受同步、只读、不保留切片的 raster hook 契约；原有
+  `SetRasterHook` 调用仍获得独立缓冲。重叠借用和更换 hook 不会复用尚在使用的
+  缓冲。测试覆盖旧 hook 保留切片、借用失效和预热后零分配复用。
+- `typesetting/fontscan` 测试用独立的可变 PingFang UI 字体集合验证命名实例与
+  不可变表共享；系统回退合法地可能优先选用 MobileAsset 中的静态字体。
+  CoreText 测试分别覆盖指定的可变字体和系统实际解析出的字重，保留精确
+  PostScript 身份与非空字形断言。
+
+- 同帧相同裁剪掩码共享图集位置，不新增 GPU 纹理；保留绝对变换输入和父级交集合成，已通过原生像素对照。见[渲染内存](../docs/rendering-memory.zh-CN.md)。
+
+- `gio/gpu/internal/metal`：统一内存设备直接初始化共享的只读几何缓冲和首次完整上传的采样图片，避免普通 UI 上传触发额外 GPU 复制工作；本机最小 Metal 实验中，这条工作路径增加约 57 MiB。CPU 生成完整 mip 链，保留 sRGB 线性光过滤；原生像素对照覆盖奇数尺寸、行间距和每级 mip，观察到最大通道差值 2/255。局部/重复上传、可变缓冲、渲染目标、非统一内存设备和分配失败保留有序 GPU 路径。不改变帧率、drawable 数量或每帧 GC。范围和限制见[渲染内存与复用](../docs/rendering-memory.zh-CN.md)。
+
+按行为整理的改动、源码与测试链接见[与上游的差异](../docs/upstream-patches.zh-CN.md)。
+下文性能数字是历史本机测量，不是本轮新跑的 benchmark 或跨平台应用保证。
+
+- 根级迁移：两个基础库实际移到 gio/ 和 typesetting/，导入前缀与目录对应。链接符号、资源发现、CI 和发布夹具同步新路径；源码检查拒绝过时的基础库导入。
+- 模块合并：删除副本的 `go.mod`/`go.sum`，把导入改写为 Keel 前缀，不再依赖应用自己写的 `replace`（Go 不会传递 replace）才能用上副本。
+- `internal/gogio`：打包器在 `keel` 进程内运行，而不是 `go run gioui.org/cmd/gogio`，因为上游 gogio 写死了 Gio 的导入路径。现在从 `GioRoot` 取路径（用于 `app.ID`、日志应用 ID、额外参数、权限和 `app/` 包查找）；参数、工作目录、环境变量和输出改为每次运行的选项（`Run`），上游包级状态通过串行调用隔离，默认产物也写入指定工作目录。WebAssembly 打包回归检查应用 ID/启动参数链接、HTML 标题和产物文件；发布夹具从真实根模块归档编译外部自定义组件。未复制 Windows 目标和上游端到端测试：Keel 自己生成 Windows 资源。`cmd/gogio` 可直接运行它，用于没有 `keel.json` 的构建，例如站点的组件库。
+
+- 打包器迁移：独立入口放在 `cmd/gogio`，共享实现放在 `internal/gogio`，两个命令共用打包器，避免在 `cmd/keel` 内嵌套命令。资源发现测试适配新的目录深度，CI 和发布夹具改为调用独立入口。
+
+- `gio/internal/nativeabi`：无 CGO macOS ABI 探针通过系统真实 `objc_msgSend` 调用 Go Objective-C IMP，覆盖 range 参数对/寄存器耗尽、嵌套 rect 参数与返回、浮点参数、可空的原生分配出参及哨兵值。类和回调只注册一次，并明确记录 purego 0.11.1 不支持标量浮点回调返回。这是 M0 可行性测试，不是已迁移的窗口后端。扩展探针覆盖结构体 super 调用及复制 block 的原生调用，arm64 实机通过；amd64 实机和精确协议签名仍须验收。
+
+- `gio/widget.Editor`：增加可选的 `ScrollBounds`、`ScrollOffset`、`ScrollTo`，让多行输入组件绘制并拖动滚动条。移动视口保留选区，后续编辑或移动光标恢复自动跟随。扩展不存在时，通过能力检测保留原生滚轮滚动；导入路径兼容性仍以迁移指南为准。1×/2× 回归覆盖边界、选区、光标可见性和内容替换。
+
+- `gio/gpu/internal/metal`：空闲清理等待最后提交的 GPU 工作完成，再释放命令缓冲区、上传/读回暂存缓冲区和四边形实例缓冲区。仍在使用的纹理和管线保留，临时缓冲区在下次绘制或读回时重建，降低空闲常驻内存而不请求新帧。无窗口回归测试覆盖重复清理、读回和恢复绘制。
+
+- 修复 `gio/internal/f32` 和 `gio/app/internal/ibus` 里 `go vet` 报的无字段名结构体字面量。
+- `typesetting/font/opentype`：能给出自身字节的资源（`Shared`，或任何有 `Bytes() []byte` 方法的资源）给出的表是切片而不是副本，也从不写入调用方传入的缓冲区。`typesetting/fontscan` 以只读方式映射系统字体文件（`mmap`、`MapViewOfFile`）并按 `Shared` 解析，字体的表是可回收的文件页，不占 Go 堆：hello 在 macOS 上空闲时的内存占用从 153 MB 降到 103 MB。`gio/font/opentype.ParseCollectionShared` 对不会变的字节做同样的事，供 `gio/font/gofont` 使用；Keel 的主题传入带 `Bytes` 方法的字体文件。测试用只读映射解析、描述、排版并取轮廓全部系统字体（`fontscan/openfont_test.go`）。
+- `typesetting/harfbuzz`：附着链指向缓冲区之前时像 HarfBuzz 一样直接返回，不再访问 `pos[-1]`；原来排版 macOS 的 Farisi.ttf 会崩溃。
+- `gio/gpu`：路径渲染器的覆盖纹理（stencil 和 intersection 帧缓冲，打包了所有圆角图形，常常比窗口还大）每帧都会重画，所以一帧提交后把它们标为可回收（`driver.Volatile`，即 Metal 的 purgeable 状态），下一帧调整尺寸、准备使用时再标回。窗口空闲时最大的几块 GPU 内存因此不计入占用：hello 在 macOS 上从 72 MB 降到 64 MB。其他后端暂未实现。
+动画中的窗口若每帧都标记，就要每帧付一次内核调用，所以只在某一帧之后 100 ms 内不再需要新帧时才标记（`app.Window` 调用 `gpu.Idle`，判断用不会消耗唤醒标记的 `input.Router.PeekWakeup`）。每个纹理记住自己的状态，状态不变时不做调用。
+- `gio/gpu/internal/metal`：GPU 缓冲按 2 的幂大小分级复用，不再每帧创建、释放（动画窗口的 CPU 有五分之一花在 `newBuffer` 和 `CFRelease` 上）。一帧中释放的缓冲要等到下一次 `BeginFrame` 等待上一个命令缓冲完成后才复用；缓冲池有上限（32 MB，每级 64 个），`gpu.Idle` 时清空。
+- `gio/gpu`：裁剪路径按内容缓存（路径数据的哈希，加上描边宽度、轮廓标志和变换），而不是按记录它的 op；后者在 `Ops` 重置后就变了。Keel 每帧重新记录，所以每个边框和圆角图形每帧都要重新细分并上传。偏移不在键里，移动的内容（如滚动）也能复用路径。动画中的组件库每 10 秒分配从 881 MB 降到 470 MB（GC 从 51 次降到 29 次）。所有静态组件截图逐字节一致。
+- `gio/app`（macOS、iOS）：`displayLink.Start` 和 `Stop` 只在请求的状态改变时才发给显示链接的 goroutine。窗口在每个动画帧都调用 `Start`，原来这个无缓冲发送每次都让主线程等一次 goroutine 交接。
+- `gio/app`（macOS）：绘制时保留三个 `CAMetalLayer` drawable。Core Animation 在窗口缩放时可能同时持有两个已提交的表面，限制为两个会让主线程在 `nextDrawable` 中间歇性等待约一秒。空闲时仍会缩小备用表面。原生回归测试 `TestMetalResizeWindow` 连续放大、缩小 60 帧，并拒绝这种合成器停顿（`KEEL_DESKTOP=1 go test ./gio/app`）。原生 Metal 测试的窗口置顶；若仍被遮挡（被覆盖、显示器休眠或锁屏），测试会跳过而不是卡住，因为被遮挡的窗口不绘制。
+- `gio/gpu`、`gio/gpu/internal/metal`：裁剪为普通矩形、填充为纯色或纹理的连续 op 合并为一次实例化绘制（`driver.QuadBatcher`，每批最多 8 个纹理），不再一个 op 一次绘制调用：终端大小的文字网格原来每帧 3,300 次绘制。Metal 着色器在运行时编译，计算与 Gio 的 blit 着色器相同；其他后端保持逐个绘制。所有静态组件截图逐字节一致。
+- `typesetting/harfbuzz`：AAT 排版（`morx`、`kerx`，Menlo 等苹果字体使用）把每个子表的字形类别缓存留在字体的加速器上，与 HarfBuzz 一致；上游把它复制进每次调用的上下文，填好后就丢弃。上下文和子表驱动的状态放在复用的 `Buffer` 里，不再每次排版分配 1.3 KB 以上。239 个带 `morx` 的 macOS 字体排版结果完全一致；benchmark 网格场景的文字分配减半。
+- `typesetting/fontscan`：`FontMap.ResolveFace` 对 ASCII 字符查当前查询的表，查询的字体族哈希每次 `SetQuery` 只算一次，不再每个字符算一次。查询或文字系统没变时，`SetQuery` 和 `SetScript` 保留缓存；Gio 排版每段文字都会调用这两个方法。测试检查带缓存的和全新的 FontMap 解析出相同的字体。
+- `gio/app`（macOS）：没人看得见的窗口（被遮住、在别的桌面、锁屏或屏幕休眠时）在第一帧之后不再绘制，并停掉显示链接；再次可见时重画（`windowDidChangeOcclusionState:`）。AppKit 只报告状态变化，所以视图挂到窗口上时也读一次状态。Gio 原来对隐藏的窗口照样画每一帧动画：benchmark 网格场景锁屏时每秒用 0.49 秒 CPU，现在 0.001 秒。
+- `gio/app`（macOS）：所有显示器都休眠时，创建显示链接失败，随后创建窗口在 `gio_onDestroy` 里崩溃（视图还没有句柄）。现在显示链接退回到主显示器，没有句柄的视图跳过 `gio_onDestroy`。
+
+- `gio/op/paint`、`gio/gpu`、`gio/gpu/internal/metal`：Metal 构建提供可选的 `ImageOp.AddTinted` 扩展，将不可变图片与每次绘制的线性颜色相乘。Keel 字形图集只保存一份白色覆盖掩码，不再为每种文字颜色复制像素（benchmark 网格从六张 1 MiB 页面降为一张）。Metal 在上传纹理前预留整帧的实例缓冲，避免共享纹理在绘制过程中退回不支持着色的路径。路径裁剪、透明度图层或批绘制不可用时，将颜色烘焙进独立缓存的纹理。未提供扩展的构建通过接口检测保留原来的彩色图集。测试覆盖纹理共享、缓存淘汰、兼容路径的颜色、透明度、变换和裁剪；8 位覆盖掩码的量化可能使边缘像素略有变化。
+在 Apple M4 上各做三轮交替测量，进程总内存中位数在网格场景从 205 降到 145 MB，控件场景从 191 降到 148 MB。240 帧离屏网格测试的每帧耗时中位数从 2.776 降到 2.452 ms，分配量从 1.18 降到 1.04 MB。这些是启用两种图集后的本机结果，不代表其他应用的内存上限或收益保证。
+
+- `gio/app`（macOS）：停止绘制一秒后，通过可取消的单次回调释放 GPU 纹理、
+  路径和临时缓冲区，并将 Metal drawable 池缩至 1×1。Core Animation 保留已显示
+  的画面，下次绘制前恢复尺寸；已编译的管线继续保留。原生窗口测试覆盖多次
+  空闲、恢复和回调尚未触发时关闭窗口。原生调用使用 purego v0.11.1，
+  合并后模块使用的 Go 版本以根 go.mod 为准。
+- `gio/gpu`：颜色、纹理、渐变的回退管线及模板渲染器按需初始化，避免纯矩形
+  场景加载未使用的着色器资源。离屏像素测试覆盖回收前后的绘制和读回。
+- `gio/io/input`：收集输入时删除相邻的纯绘制叶子裁剪节点，保留输入处理、
+  光标、语义和窗口动作节点。随机测试与原收集器逐点比较命中结果。
+- `typesetting/font`：仅为实际测量过的字形分配 extents 缓存页；CFF 字体保留
+  已校验的 charstring INDEX 偏移，省去每个字形的 Go 切片头。公开的展开式
+  CFF 解析接口保留原行为。测试覆盖缓存边界、畸形 INDEX 和轮廓等价性。
+- `typesetting/fontscan`：共享内容相同的只读系统字体字符覆盖集合，哈希后仍
+  比较完整内容；查询缓存持有字体族切片副本，避免调用者复用切片破坏缓存。
+- `gio/text`、`typesetting/shaping`、`typesetting/harfbuzz`：缓存已解析字体族，
+  为符合条件的文本跳过多余换行和分段，复用规范化临时空间，避免复制整份
+  shaping-plan 键。快速路径保留 Unicode 强制换行，并配有回归测试。
+- `typesetting/fontscan`（macOS）：额外扫描 `/System/Library/AssetsV2/com_apple_MobileAsset_Font*`，当前 macOS 把苹方等系统字体放在这里。否则"PingFang SC"永远解析不到，中文回退到冬青黑 W3，且没有 Medium、Semibold。`fontscan/scan_darwin_test.go` 验证三种字重都能解析。
+- `gio/text`、`gio/font`、`gio/widget`、`gio/widget/material`：平台字形光栅化。`Shaper.GlyphFile(id)` 返回字形所在的字体文件、集合内序号、字号和字形 id（实现 `font.FaceSource` 的字体保留路径；内置字体、可变字体实例和设置了变体坐标的字体返回 false）。`Shaper.SetRasterHook` 注册绘制一行纯色字形的函数；`Label`、`Editor`、`Selectable` 新增可选的 `Color`（由 `material.LabelStyle` 和 `EditorStyle` 设置），有挂钩时每行按整像素平移并把小数部分交给挂钩，挂钩返回 false 时回退到轮廓。Keel 的 theme 在 macOS 上设置挂钩，用 CoreText 绘制，通过接口断言检测可选能力；这不代表可以混用上游与 Keel 的导入路径。
+- `gio/gpu`：不透明全窗口背景清除已覆盖的绘制操作时，同时清除已完成的透明度图层。旧图层索引否则会替换前景中无关的绘制操作，导致全屏覆盖页面缺字。回归测试覆盖旧图层清理、后续新图层、局部覆盖和活动透明度组内的填充。
+
+## Wayland 销毁确认
+
+Wayland 后端在返回无效的 `WaylandViewEvent` 后，等调用方下一次调用 `Event`
+才销毁原生窗口和连接。事件入队不代表调用方已经处理：Keel 必须先在连接仍有效时
+释放滚动监听器的 pointer、seat 和私有队列。此前 `close` 立即断开连接，导致 Linux
+上的 `wlScrollWatch.close` 访问已释放的对象。
+`deferred_teardown_test.go` 覆盖通知、确认与只清理一次的顺序。
+
+- `gio/app`（Wayland）：`Run` 回调排队到原生事件线程执行。此前后台最大化、配置窗口与收集帧指令并发，可能在 GPU 读取时重置录制指令。关闭时先停止队列唤醒，再关闭原生管道，并让等待中的 `Window.Run` 返回。回归测试在执行排队重置前解码当前帧。
+
+- `gio/app`（X11）：`Run` 回调排队到事件循环执行，与 Wayland 相同。Gio 原先在调用方的 goroutine 上执行它们，于是 Perform 和 Configure 在那里调用 Xlib，而事件循环正阻塞在 X 连接的 poll 上。这类调用期间，Xlib 可能把 socket 上的事件读进自己的队列；如果这发生在事件循环最后一次 XPending 之后，poll 永远不会醒来，窗口收不到关闭请求。无 cgo 的 Xvfb 环境下，reopen 真实窗口用例在 3840 次运行中超时（"FAIL: timeout"）5 次；超时时的转储显示事件循环停在 poll，socket 和通知管道都为空，Xlib 队列里有一个事件。事件循环启动之前，`Run` 仍直接调用 f，因为 `Window.init` 在 `Event` 内部重放早先的操作。关闭时先停止队列唤醒，再关闭通知管道，并让等待中的 `Window.Run` 返回。`os_x11_run_test.go` 覆盖排队、唤醒和关闭。
+
+- `gio/gpu`：按图片绘制操作记录是否位于透明度图层内，无关图层不再让整帧禁用着色纹理共享；路径裁剪和图层内图片仍使用烘焙颜色。纹理数量和原生像素测试覆盖无关图层与嵌套透明度。CoreText 页面改为 256×256，保留 32 MiB 像素预算，减少回退路径按颜色复制整页的成本；缓存测试覆盖淘汰和当前帧正在使用的页面。
+
+- `typesetting/fontscan`（macOS）：扫描系统 FontServices 的 `Resources/Reserved` 目录。当前 macOS 将 PingFangUI.ttc 放在这里，漏扫会静默回退到其他中文字体。原生字体解析测试覆盖 Helvetica Neue 与 PingFang SC。
+
+- `ui/theme` 原生字形绘制：通过 purego 按 PostScript 身份寻找所选 TTC 字体。CoreText 展开命名实例后，描述符下标不等于 TTC 字体编号。原生测试检查实际创建的苹方简体 Medium 和 SF Regular 对象，防止将前者画成香港 Thin；未新增 cgo 绑定。
+
+- `typesetting/font/opentype/tables`：修复 `fvar` 命名实例记录步长，并限制单条记录的读取范围，避免缺失的 PostScript 名称读到下一条记录。`fontscan` 收录其他轴为默认值的命名字重，加载对应变体坐标，并把磁盘缓存升到版本 7。`gio/text.Shaper.GlyphFileInstance` 向 CoreText 传递所选实例；原生测试覆盖 Regular 和 Semibold 从排版到绘制的实际身份。
+
+### 2026-10-14：帧缓冲与可变字体表的保留内存
+
+- `gio/gpu/path.go`：帧缓冲浪费比例改为“保留面积 / 请求面积”。原来的反向比例使大帧之后的小帧无法缩小缓冲。`gio/gpu/fbo_memory_test.go` 验证缩小、同尺寸复用和释放。
+- `typesetting/fontscan`：同一文件、同一 TTC 索引的命名实例共享只读字体表，每个实例仍保留独立的 `Font` 身份和 `Face`，保持位置元数据与变体坐标正确。Darwin PingFang 实例测试同时检查 GSUB 底层存储共享和字重区分。
+- `typesetting/font`：加载后保留字形头和变体所需点数，仅在请求轮廓时缓存完整 TrueType 轮廓，避免原生文字绘制长期保留全部 CJK 轮廓。共享缓存加锁，Face 的临时状态仍独立。测试逐一对照 Go Regular 的全部轮廓，以及 PingFang 四个字重的中英文字形，并验证并发访问。
+
+### 2026-10-14：带覆盖纹理的批量绘制与保守裁剪内区
+
+- Metal 将路径/交集裁剪下的纯色和图片合入批量绘制，覆盖纹理共用现有八个纹理槽，保持原来的 `min(abs(value), 1)` 覆盖率运算。裁剪内的着色字形可以共享图集；透明度图层和不支持此能力的设备仍走原回退路径。测试覆盖纹理槽耗尽、顺序、着色、分配失败回退，以及圆角/嵌套裁剪的原生像素。
+- 圆角矩形路径操作携带保守内区。只有所有路径祖先均完整包含绘制像素边界时，才跳过覆盖合成；额外一像素余量保护抗锯齿边缘。未知路径、描边、旋转和不支持的变换矩形保留原路径。收集测试覆盖这些情况；内部裁剪编码增加 16 字节，所有读取者使用统一更新的长度。
+- OneCatch 的 5016×2820 像素对照最大单通道差值为 1/255。实际窗口加载和滚动仍超过 300 MiB；像素测试和较低的帧提交耗时都不能证明内存达标或端到端帧率。
+
+- `typesetting/shaping`：行尾空白裁剪先核对原始字簇是否全为空白。轮廓尺寸读取失败（本机苹方 UI 字体可复现）也会得到零墨迹宽度，不能据此清零行末可见字形的前进宽度。多字体单行快速路径和换行路径共用检查；新增 LTR、RTL、纵排合成测试及混合字体标签尺寸、像素回归。
+- `typesetting/shaping`：换行测量候选行宽也使用同一检查。`Output.advanceSpaceAware` 曾把行末零墨迹宽度的字形当作空白、不计入行宽，苹方（读不到轮廓尺寸）下每行中文因此多排一个字，最后一个字被裁切。现在只有原文是空白时才扣除（与裁剪共用 `whitespaceCluster`）。合成测试覆盖换行行数和行宽检查。
+
+### 2026-10-14：呈现阶段的 GPU 设备丢失恢复
+
+- `gio/app`：移植上游 Gio 提交 [bf9f995](https://github.com/gioui/gio/commit/bf9f995d86c22d555d7ce2db154395bca94541b7)。`Present` 返回 `gpu.ErrDeviceLost`（包括包装后的错误）时，释放 GPU 上下文并立即安排下一帧；已经确认交付的帧不能重试。Keel 仅在呈现成功且上下文仍加锁时执行空闲 GPU 资源回收。
+- 回归测试覆盖成功、直接与包装的设备丢失错误、其他错误、帧确认次数和上下文加锁/释放顺序。Windows 交叉编译通过，尚未进行 Windows 真机验证。Metal 当前不会返回呈现错误，因此该补丁不降低 macOS 内存峰值。
+
+### 2026-10-17：可变图片与无 mipmap 线性过滤
+
+- `gio/op/paint`、`gio/gpu`，新增 `gio/internal/dirty`：`NewMutableImageOp`
+  返回的 ImageOp 允许调用方在布局阶段修改像素，再用 `Invalidate(rect)`
+  报告变化区域。它的 handle 是 `dirty.Tracker`，记录最近 32 个变化矩形。
+  `texHandle` 把纹理所持版本之后的变化区域合并后上传进原纹理
+  （`updateTexture`）；落后超过记录长度时整张上传。着色纹理只重新着色变化区域。
+  各驱动本来就支持带偏移的上传，并会在上传后重新生成 mipmap。
+- `paint.FilterLinearNoMipmap`（过滤字节 2）创建缩放都用线性过滤、不带 mip
+  层级的纹理，各驱动均支持这种组合。Metal 的 CPU mipmap 路径
+  （`uploadMipmaps`）每次上传线性过滤图片都会在 Go 里逐级分配内存。
+- 原因：远程桌面客户端 Mirage 每次更新都整张重建 tile 纹理，并且要保留多份
+  CPU 副本直到 Gio 用完。测试覆盖子图片源的局部上传、同一帧多次变化的合并、
+  越界裁剪、超出记录后的整张补传、着色、过滤映射、op 编码和纹理释放。
+  在真实 macOS 窗口中以每秒 30 次重绘 2880×1800 的远端画面（缩放 0.44，
+  仍走 mipmap 路径）：Mirage 的内存占用从约 450 MB 降到约 324 MB，Go 堆存活
+  数据从 104 MB 降到 43 MB，GC 从每分钟 67 次降到 11 次。真实窗口只验证了
+  Metal；OpenGL、Direct3D 11 和 Vulkan 走同样的偏移上传，但尚未用可变图片测试。
+
+### 2026-10-18：surface 图片（IOSurface 纹理）
+
+- `gio/op/paint`、`gio/gpu`、`gio/gpu/internal/driver`、`gio/gpu/internal/metal`，
+  新增 `gio/internal/surface`：`paint.NewSurfaceOp(s)` 显示 `paint.Surface`
+  的当前画面。Surface 是平台的 GPU 表面，由持有者用 `Set(ref, size)` 替换。
+  `texHandle` 把它交给 `surfaceTexture`：只在画面变化时向设备
+  （`driver.SurfaceTextureDevice`）要一张包住该表面的纹理，不带 mipmap，
+  并释放上一张。不支持该接口的设备画一个透明像素。Metal 通过 purego
+  （`surface_darwin.go`）以 BGRA8Unorm_sRGB 调用
+  `newTextureWithDescriptor:iosurface:plane:` 实现，没有新增 C 代码。
+- 原因：Mirage 用 VideoToolbox 解码 macOS 的 HEVC 屏幕流，解码输出就是
+  IOSurface。原先每个 4K 帧要转成 RGBA、复制进 tile 图片再上传，每秒 40 帧时
+  每帧约 100 MB 内存读写。surface 纹理直接共用解码器的内存。测试覆盖每个画面
+  只包装一次、释放上一张纹理、回退路径、从真实 IOSurface 纹理读回的像素，以及
+  无头 Metal 窗口在三种缩放下把 surface 画得与同样像素的 ImageOp 逐字节一致。
+- `gio/app`（macOS、iOS）：空闲时回收 GPU 内存改为去抖。被外部频繁更新驱动重绘的窗口（远程屏幕通过 `Invalidate` 每秒 60 次更新）每帧之后都不再请求下一帧，于是每帧都把覆盖纹理标为 volatile、等 GPU 完成、释放暂存缓冲、缓冲池和 quad 缓冲，下一帧再全部恢复（仅 `textureSetVolatile` 就占 Mirage CPU 采样约 12%）。现在由 Metal context 的定时器（`idleDebounce`）在窗口 250 ms 没有提交新帧后调用 `gpu.Idle`，macOS 上 1 s 后照旧调用 `gpu.Trim` 并缩小 drawable。定时器只设置一次，只在空闲帧需要更早触发时才调整，不再每帧停止、新建。其他 context 仍直接调用 `gpu.Idle`。纯 Go 测试用 60 Hz、低频和动画帧序列驱动去抖逻辑；`TestMetalIdleWindow` 新增 60 Hz 的 90 帧，期间不得回收，停止后回收一次。
+- `gio/gpu/internal/metal`：不超过 4 KiB 的缓冲放在 Go 内存里（通过 `set*Bytes` 传给 GPU，每条重建的路径都用到），其存储按 2 的幂分级复用，每级最多 256 个，`Trim` 时清空。`set*Bytes` 会把内容复制进编码器，所以缓冲释放后存储即可复用。60 Hz 的 Mirage 会话原先每秒分配数 MB。`TestSmallBufferStoresReused` 检查复用、清零，以及一个小的不可变缓冲只分配一次（`*Buffer` 本身）。
+- `gio/op/paint`、`gio/gpu`、`gio/internal/dirty`：`NewSharedImageOp(src, mu)` 是由所有者在帧外写像素的可变图片。渲染器只在读取 `src` 时（创建纹理，或版本变化后上传变化区域）持有 `mu`，且都在帧内完成。远程桌面客户端可以把解码器的帧缓冲用 `SubImage` 切成共用一把锁的 tile 直接交给渲染器，不必再复制一份 tile 图片（5K 屏幕约 60 MB）。`TestSharedImageReadsUnderLock` 检查每次上传都持有锁、未变化的 tile 不取锁，并在 `go test -race` 下验证并发写入。
+- `gio/app`（macOS）：2026-10-18 复查两个 drawable 是否够用（2560x1680 时每个 16.7 MB）：`maximumDrawableCount = 2` 时 `TestMetalResizeWindow` 3 次运行 3 次停顿，因此保持三个。
+
+## SVG 解析器
+
+`internal/oksvg` 来自 `github.com/srwiley/oksvg` 的 `v0.0.0-20221011165216-be6e8873101c`，许可为 BSD-3-Clause（`internal/oksvg/LICENSE`）。它是 Keel 模块内的内部包，没有嵌套模块或 replace 指令。光栅化继续使用上游 `github.com/srwiley/rasterx`。
+
+补丁：`public.go` 改用本地字符集读取函数。默认构建接受 UTF-8，拒绝其他编码声明；`-tags keel_legacy_svg` 使用原来的 `charset.NewReaderLabel`。这样旧字符集编解码表及其初始化代码不会进入每个 kit 客户端。绘制代码保持不变；副本旁包含与上游的像素对比及编码测试。更新时复制上游非测试 Go 文件和 LICENSE，再应用读取函数选择补丁。
+
+### 按需选择 Chroma 规则
+
+`ui/highlight/golang` 复制 Chroma v2.27.0 的 Go lexer 和 Go 模板、纯文本 XML 规则（MIT，附许可证）。改为独立注册表，省略 Go HTML 模板，避免 Components 链入数百种无关语言。token 转换与完整语言入口共用。对比测试覆盖支持的别名、不完整代码、Unicode、原始字符串模板及配色。
+
+## 从 Mirage 迁入的 Linux 集成
+
+增加 DMA-BUF 注册与 EGL 外部图像导入、GPU fence 生命周期、Wayland 组合文本批处理、IBus 有序更新、X11 无边框提示与手势、Wayland 无边框装饰协商和标题栏配色扩展。这些修改归属 Keel，不应放在应用的 vendor 副本中。包含表面生命周期、输入法和 X11 回归测试，未新增 cgo。
+
+## MyGo 应用模式
+
+`ui/kit/app_shell.go` 参考并改写了 [MyGo ui/router.go](https://github.com/egoist/mygo/blob/96334a46826e59b2bf4ef9dff7321bd57b18927c/ui/router.go) 的平级页面淡入与页面状态保留方式。
+`ui/motion/transition.go` 使用该版本 `ui/motion.go` 的 Smooth/Snappy/Bouncy 预设参数：500ms，回弹分别为 0、0.15、0.3。
+Keel 保留自己的渲染器和弹簧求解器，不链接 MyGo 运行时。
+Copyright (c) 2026 MyGo contributors。[MIT 许可证](mygo/LICENSE)。
+
+## 变换后的语义边界
+
+`gio/io/input` 用四个角计算变换后的语义区域，避免旋转、反射、斜切造成无障碍及自动化矩形倒置或缺失。`TestSemanticTransformedBounds` 覆盖这些变换；元素动画测试覆盖嵌套变换和指针路由。
+
+## 命令重放时的指针结束事件
+
+前面仍有输入等待重放时，保留无人订阅的指针释放与取消事件。此前动画重绘或焦点命令会重放按下事件，却丢失合并进去的释放事件，导致浮层关闭、重开后仍被旧接收者捕获指针。`gio/io/input/pointer_replay_test.go` 覆盖只订阅按下的接收者、命令重放和随后在另一位置的点击。这是开发分支中的 Keel 本地补丁，尚未进入上游或 v0.4.2。
+
+## 仿射变换下的线性渐变
+
+`gio/gpu` 通过绘制变换的逆矩阵映射渐变坐标。原先套用纹理包围盒映射，忽略了
+缩放，旋转和剪切的结果也不正确，导致共享元素在缩放衔接时跳色。新映射也处理
+重合端点，避免 NaN。`gradient_transform_test.go` 覆盖平移、非等比缩放、旋转和
+剪切；无头 GPU 测试比较等效缩放的像素，允许两个通道级别的 GPU 舍入差异。
+Keel 的共享渐变/阴影首帧在所测 Apple silicon 主机上逐字节一致。
+此补丁仍在本地工作分支，不属于 v0.4.2。
+
+### Wayland 桌面字体缩放
+
+`gio/app/os_wayland.go` 按当前桌面选择字体缩放来源：GNOME 系使用 GNOME，Cinnamon 使用 Cinnamon，其他会话回退为 1。避免 Hyprland 因无关的 GNOME 偏好而仅放大字体。显示器缩放不变，桌面来源和缩放解析均有测试，未引入 cgo。
+
+### 2026-11-14：Wayland EGL 交换间隔
+
+两种原生绑定均在 `Lock` 绑定绘制表面后设置 Wayland EGL 交换间隔。原先在构造函数中调用可能返回 `EGL_BAD_CONTEXT`，导致 Mesa 在 `eglSwapBuffers` 中等待隐藏窗口的帧回调，阻塞窗口事件。`TestWaylandEGLCurrentSurface` 在真实 Mesa 上验证调用有效性（Wayland 下设置 `KEEL_DESKTOP=1`）。
+
+### 浏览器历史记录归属
+
+`gio/app` 增加可选的 `CustomBrowserHistory` 窗口选项。自行管理 URL 路由的浏览器应用不应再创建 Gio 的额外历史记录或使用其返回键处理器：否则应用恢复路由后，Gio 可能再次执行 `history.back()`。默认行为不变。选项测试位于 `gio/app/browser_history_test.go`；`scripts/verify-gallery-web.cjs` 在实际 Chromium 中验证触控导航、浏览器返回和跨分类链接。这是本地工作区补丁。
+
+EmojiPicker 目录来自 Unicode 17.0 emoji-test.txt，由 scripts/generate-emoji.py 生成；源文件 SHA256 为 1d8a944f88d7952f7ef7c5167fef3c67995bcae24543949710231b03a201acda。Unicode License V3 见 unicode/LICENSE。生成结果保留所有 fully-qualified 序列，将统一肤色变体归入基础条目，混合肤色序列仍独立可选。
+
+### WASM 大型处理器表中的无焦点输入提示
+
+`gio/io/input` 在没有焦点时直接返回记住的输入提示；nil 不是有效的处理器标签。本机 Go 1.27.4 JS/WASM 工具链在足够大的 map 中查询 nil 接口键时，会在 `runtime.mapaccess2` 越界；只依赖标准库的独立程序也能复现。包含上千个处理器的分类预览在 `Window.updateState` 中触发该查询，异常之后可能表现为 Chrome 157 的 `call to released function`，或 Chromium 159 headless shell 渲染进程崩溃。提前返回保留焦点／输入提示语义，避开无意义的查询，不修改 Go 的 map 实现。`TestInputHintWithoutFocusInLargeHandlerTable` 验证 4,096 项处理器表、无焦点提示不变、焦点切换及不重复通知；同一测试以 JS/WASM 运行，未修复时失败，修复后通过。这是本地工作区补丁，不归属于已发布的 Keel 版本。
+
+### 系统字体目录扫描中的空 logger
+
+`typesetting/fontscan.DefaultFontDirectories(nil)` 现在与其他公共 fontscan 入口一样选择默认 logger。此前 fontconfig 解析／警告路径会解引用 nil，Linux 上已有的系统字体只读映射测试触发了该崩溃。`TestDefaultFontDirectoriesNilLoggerWithInvalidConfig` 使用临时的错误 fontconfig 配置，验证调用能够返回而非 panic；测试不修改系统配置。
+
+### 字体查询缓存对照测试
+
+`TestResolveFaceCachesMatchUncachedMap` 保留两张独立加载且查询历史一致的字体表，每次解析前清空对照表的 LRU、ASCII、查询哈希和候选缓存。原测试每次查询重建对照表，改变了其首个已加载的兜底字体，导致不支持的文字系统／字符组合失败，尽管接口允许这种情况下返回任意字体。所有查询、文字系统、字符及重复轮次仍完整比较；生产匹配和兜底行为不变。
+
+### 共享 EGL 显示连接的生命周期
+
+`gio/internal/egl` 按 EGL 显示连接统计存活上下文，并串行化上下文的创建／销毁。重复调用 `eglInitialize` 不会产生独立的显示连接生命周期；此前关闭一个窗口就终止显示连接，使仍存活的其他窗口失效。现在仅最后一个 Keel 上下文调用 `eglTerminate`；首个上下文创建失败时清理已初始化连接，不终止其他存活上下文的连接。不增加逐帧锁、轮询或修改渲染器。`TestReleasingPeerPreservesEGLDisplay` 在修复前复现 `EGL_BAD_DISPLAY`，修复后关闭一个窗口仍可绘制并读回另一窗口的像素。原生 scaling 测试同时检查滚动和缩放尺寸，结果与无窗口像素测试分别记录。

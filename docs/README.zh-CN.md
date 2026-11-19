@@ -1,0 +1,55 @@
+# Keel 文档
+
+[English](README.md) | 简体中文
+
+第一次使用，从“快速开始”运行第一个窗口。开发应用时查“编写应用”和“组件参考”；修改框架时再看“参与开发”。
+
+## 开始使用
+
+- [快速开始](getting-started.zh-CN.md)：用脚手架新建项目、修改界面、运行和打包。
+- [在浏览器里运行](web.zh-CN.md)：WebAssembly 构建与桌面版差异。
+- [迁移到当前 kit](migration-kit.zh-CN.md)：旧版本 API 的替换方式。
+
+## Mobile
+
+- [概览](mobile.zh-CN.md)：iOS 与 Android 的支持范围和系统能力边界。
+- [iOS](ios.zh-CN.md)：构建、模拟器运行、生命周期适配和真机签名。
+- [Android](android.zh-CN.md)：APK 打包、设备安装运行和工具链检查。
+
+## 编写应用
+
+- [元素与视图](el.zh-CN.md)：布局、状态、事件、焦点、滚动和浮层。
+- [窗口与应用](app.zh-CN.md)：多窗口、生命周期、快捷键与离屏截图。
+- [主题](theme.zh-CN.md)：配色、字体、尺寸、局部主题与动态效果。
+- [Markdown](markdown.zh-CN.md)：流式输出、代码块、缓存和定制。
+- [原生能力](native.zh-CN.md)：权限、截图、键鼠、全局快捷键、通知和剪贴板。
+- [无样式基础层](base.zh-CN.md)：复用键盘导航与多选行为，自定义控件外观。
+- [无障碍](accessibility.zh-CN.md)：VoiceOver 在 Keel 窗口里能读到和按下什么。
+
+## 组件参考
+
+- [组件分类与公共约定](kit.zh-CN.md)：按用途查组件，查看 API 和交互示例。
+
+## 测试与调试
+
+- [Agent 端到端测试](automation.zh-CN.md)：通过 MCP 启动应用、操作组件与截图。
+- [常见问题](troubleshooting.zh-CN.md)：环境、文字排版、刷新、窗口和权限问题。
+- [测试](testing.zh-CN.md)：交互回归、截图矩阵和真实窗口测试。
+
+## 参与开发
+
+- [架构](architecture.zh-CN.md)：模块职责、依赖边界与线程规则。
+- [扩展指南](extending.zh-CN.md)：新增组件、原生能力和示例的步骤。
+- [组件开发规范](component-development.zh-CN.md)：API、状态、文件组织与验收要求。
+- [组件视觉规范](visual-guidelines.zh-CN.md)：字号、尺寸、留白、颜色和交互状态。
+- [设计决策](decisions.zh-CN.md)：全局取舍与历史方案。
+- [单模块](single-module.zh-CN.md)：Gio 和 go-text 作为 Keel 模块的包、导入前缀与迁移。
+- [与上游的差异](upstream-patches.zh-CN.md)：Gio、go-text 与打包器的改动、源码位置、回归测试和兼容边界。
+- [渲染内存与复用](rendering-memory.zh-CN.md)：渲染器分配改动、原生测量、回归覆盖和限制。
+- [桌面端无 CGO 交付设计](desktop-cgo-free.zh-CN.md)：原生绑定迁移与验收门槛。
+- [桌面无 CGO 实现验证记录](desktop-cgo-free-validation.zh-CN.md)：已验证的构建和 ABI 结果、限制与待验收事项。
+- [组件库能力差距](gallery-gaps.zh-CN.md)：对比范围及待补齐行为。
+- [共享 WebAssembly 实验](shared-wasm.zh-CN.md)：单运行时模块加载、测量结果与生产门槛。
+
+
+各模块目录下的 README 记录源码职责和实现文件；提交贡献前阅读仓库的 [贡献说明](../CONTRIBUTING.zh-CN.md)。

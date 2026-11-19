@@ -1,0 +1,316 @@
+package main
+
+import (
+	"bytes"
+	"embed"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"text/template"
+	"unicode"
+
+	"github.com/dyike/keel/internal/svgicon"
+)
+
+//go:embed template
+var templates embed.FS
+
+func (c *cli) newProject(args []string) error {
+	fs := flag.NewFlagSet("new", flag.ContinueOnError)
+	fs.SetOutput(c.errw)
+	module := fs.String("module", "", "Go module path (default: the directory name)")
+	name := fs.String("name", "", "app name shown to people (default: from the directory)")
+	appID := fs.String("appid", "", "reverse-DNS app ID (default: com.example.<binary>)")
+	keel := fs.String("keel", keelVersion(), "Keel version to require")
+	replace := fs.String("replace", "", "use a local Keel checkout at this path (for developing Keel)")
+	offline := fs.Bool("offline", false, "use cached release metadata; write files without fetching dependencies")
+	lang := fs.String("lang", "en", "language of the generated app's text: en or zh-CN")
+	ci := fs.String("ci", "", "also write a CI workflow that tests and packages on each desktop OS: github")
+	fs.Usage = func() {
+		fmt.Fprintln(c.errw, "Usage: keel new <dir> [flags]")
+		fs.PrintDefaults()
+	}
+	dirArg, rest := splitPositional(args)
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	if dirArg == "" && fs.NArg() > 0 {
+		dirArg = fs.Arg(0)
+	}
+	if dirArg == "" {
+		fs.Usage()
+		return errors.New("missing project directory")
+	}
+	if *lang != "en" && *lang != "zh-CN" {
+		return fmt.Errorf("unknown -lang %q: use en or zh-CN", *lang)
+	}
+	if *ci != "" && *ci != "github" {
+		return fmt.Errorf("unknown -ci %q: use github", *ci)
+	}
+	dir := dirArg
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(c.wd(), dir)
+	}
+	if err := checkProjectDestination(dir); err != nil {
+		return err
+	}
+	base := filepath.Base(dir)
+	binary := binaryName(base)
+	cfg := &Config{
+		Name: *name, AppID: *appID, Version: "0.1.0", Build: 1,
+		Binary: binary, Icon: "appicon.png", Main: ".",
+		IOS:     &IOSConfig{MinimumVersion: "18.0"},
+		Android: &AndroidConfig{MinimumSDK: 23, TargetSDK: 35},
+	}
+	if cfg.Name == "" {
+		cfg.Name = displayName(base)
+	}
+	if cfg.AppID == "" {
+		cfg.AppID = "com.example." + strings.NewReplacer("_", "", "-", "").Replace(binary)
+	}
+	if *module == "" {
+		*module = binary
+	}
+	if err := cfg.validate(); err != nil {
+		return err
+	}
+	gomod := "module " + strconv.Quote(*module) + "\n\ngo " + minGoVersion + "\n"
+	// Gio and go-text are packages of the Keel module: one requirement
+	// brings Keel's copies, with no replace of the app's own.
+	if *replace != "" {
+		abs := *replace
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(c.wd(), abs)
+		}
+		abs, err := filepath.Abs(abs)
+		if err != nil {
+			return err
+		}
+		if err := validateLocalModule(abs, keelModulePath); err != nil {
+			return err
+		}
+		gomod += "\nrequire github.com/dyike/keel v0.0.0\n\nreplace github.com/dyike/keel => " + strconv.Quote(filepath.ToSlash(abs)) + "\n"
+	} else {
+		exact, err := c.resolveKeelVersion(*keel, *offline)
+		if err != nil {
+			return err
+		}
+		*keel = exact
+		gomod += "\nrequire github.com/dyike/keel " + exact + "\n"
+	}
+	if *ci == "github" {
+		// The workflow runs go tool keel: the CLI at the app's Keel version.
+		gomod += "\ntool " + keelModulePath + "/cmd/keel\n"
+	}
+	target := dir
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	// Generate and resolve dependencies in an owned sibling directory. Never
+	// recursively remove the user destination, even if it was initially empty.
+	stage, err := os.MkdirTemp(filepath.Dir(target), ".keel-new-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stage)
+	dir = stage
+	// Current is a Keel with windowtest and KeepState: the CLI's own release
+	// or the local checkout. Older releases get the earlier template.
+	writeTest := *replace != "" || *keel == keelVersion()
+	data := map[string]any{"Name": cfg.Name, "Module": *module, "Lang": *lang, "Test": writeTest, "Current": writeTest, "CI": *ci == "github"}
+	for out, tmpl := range map[string]string{
+		"main.go": "main.go.tmpl", "app.go": "app.go.tmpl",
+		".gitignore": "gitignore.tmpl", "README.md": "README.md.tmpl",
+		"README.zh-CN.md": "README.zh-CN.md.tmpl",
+	} {
+		if err := writeTemplate(filepath.Join(dir, out), tmpl, data); err != nil {
+			return err
+		}
+	}
+	if writeTest {
+		if err := writeTemplate(filepath.Join(dir, "app_test.go"), "app_test.go.tmpl", data); err != nil {
+			return err
+		}
+	}
+	if *ci == "github" {
+		// GitHub's ${{ }} expressions are not templates: copy the file as is.
+		src, err := templates.ReadFile("template/github-build.yml")
+		if err != nil {
+			return err
+		}
+		workflows := filepath.Join(dir, ".github", "workflows")
+		if err := os.MkdirAll(workflows, 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(workflows, "build.yml"), src, 0o644); err != nil {
+			return err
+		}
+	}
+	icon, err := placeholderIcon()
+	if err != nil {
+		return fmt.Errorf("placeholder icon: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, cfg.Icon), icon, 0o644); err != nil {
+		return err
+	}
+	if err := cfg.save(dir); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o644); err != nil {
+		return err
+	}
+	if !*offline {
+		if err := c.command(dir, []string{"GOWORK=off", "GOFLAGS="}, "go", "mod", "tidy"); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintln(c.out, "Offline: dependencies are pinned; run go mod tidy before building and commit go.mod/go.sum.")
+	}
+	if err := installProject(stage, target); err != nil {
+		return err
+	}
+	if *replace == "" {
+		fmt.Fprintf(c.out, "Keel: %s@%s\n", keelModulePath, *keel)
+	}
+	fmt.Fprintf(c.out, "Created %s (%s, %s).\n\n  cd %s\n  keel run\n", cfg.Name, cfg.AppID, *module, dirArg)
+	return nil
+}
+
+func checkProjectDestination(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read project destination %s: %w", dir, err)
+	}
+	if len(entries) != 0 {
+		return fmt.Errorf("%s is not empty", dir)
+	}
+	return nil
+}
+
+// Install with exclusive hard links, never overwriting concurrently created
+// files. Dependency failures occur before this function and leave the target
+// untouched. On an installation error, retain any installed files: deleting
+// them could race a user editing or replacing them. Report that explicitly.
+func installProject(stage, target string) error {
+	if err := checkProjectDestination(target); err != nil {
+		return err
+	}
+	created := false
+	if err := os.Mkdir(target, 0o755); err == nil {
+		created = true
+	} else if !os.IsExist(err) {
+		return err
+	}
+	entries, err := os.ReadDir(stage)
+	if err != nil {
+		if created {
+			os.Remove(target) // Removes only an empty directory, never its contents.
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if err := linkTree(filepath.Join(stage, entry.Name()), filepath.Join(target, entry.Name())); err != nil {
+			if created {
+				os.Remove(target) // Preserve concurrent files and any installed files.
+			}
+			return fmt.Errorf("install project %s: %w; any installed files were retained to protect concurrent changes", target, err)
+		}
+	}
+	return nil
+}
+
+// linkTree hard-links src to dst, creating directories (such as .github)
+// exclusively and linking the files inside them.
+func linkTree(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return os.Link(src, dst)
+	}
+	if err := os.Mkdir(dst, info.Mode().Perm()); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := linkTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeTemplate(path, name string, data any) error {
+	src, err := templates.ReadFile("template/" + name)
+	if err != nil {
+		return err
+	}
+	t, err := template.New(name).Parse(string(src))
+	if err != nil {
+		return err
+	}
+	var b bytes.Buffer
+	if err := t.Execute(&b, data); err != nil {
+		return err
+	}
+	return os.WriteFile(path, b.Bytes(), 0o644)
+}
+
+// splitPositional takes a leading non-flag argument, so both
+// "keel new dir -flag" and "keel new -flag dir" work.
+func splitPositional(args []string) (string, []string) {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		return args[0], args[1:]
+	}
+	return "", args
+}
+
+// binaryName turns a directory name into a lowercase executable name.
+func binaryName(base string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(base) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		case unicode.IsSpace(r) || r == '.':
+			b.WriteRune('-')
+		}
+	}
+	s := strings.Trim(b.String(), "-_")
+	if s == "" || s[0] >= '0' && s[0] <= '9' {
+		s = "app" + s
+	}
+	return s
+}
+
+// displayName turns "my-app" into "My App".
+func displayName(base string) string {
+	words := strings.FieldsFunc(base, func(r rune) bool { return r == '-' || r == '_' || unicode.IsSpace(r) })
+	for i, w := range words {
+		r := []rune(w)
+		r[0] = unicode.ToUpper(r[0])
+		words[i] = string(r)
+	}
+	if len(words) == 0 {
+		return "App"
+	}
+	return strings.Join(words, " ")
+}
+
+// placeholderIcon is the template artwork, full bleed at 1024px; keel
+// build cuts it into each platform's shape.
+func placeholderIcon() ([]byte, error) {
+	svg, _ := templates.ReadFile("template/appicon.svg")
+	return svgicon.Render(svg, 1024)
+}

@@ -1,0 +1,96 @@
+package kit
+
+import (
+	"image/color"
+
+	"github.com/dyike/keel/ui/el"
+	"github.com/dyike/keel/ui/theme"
+)
+
+// check is the shared row of checkbox-like controls: a focusable,
+// clickable row with a mark and a label. Space and Enter toggle it.
+func check(id, role, label, name string, selected, disabled bool, mark el.Element, toggle func()) *el.DivEl {
+	return checkLabelSide(id, role, label, name, selected, disabled, mark, toggle, false)
+}
+
+func checkLabelSide(id, role, label, name string, selected, disabled bool, mark el.Element, toggle func(), labelLeft bool) *el.DivEl {
+	if name == "" || label != "" {
+		name = label
+	}
+	row := el.Div().ID(id).Role(role).Name(name).Selected(selected).Disabled(disabled).
+		Row().Items(el.Center).Gap(theme.SpaceMd).Py(theme.SpaceXxs).Rounded(theme.RadiusSm).Focusable(true).OnClick(toggle).
+		FocusStyle(func(s *el.Style) { s.BorderColor(theme.Primary) })
+	if !disabled {
+		row.CursorPointer()
+	}
+	if labelLeft && label != "" {
+		row.Child(el.Text(label).ID("label"))
+	}
+	row.Child(mark)
+	if !labelLeft && label != "" {
+		row.Child(el.Text(label).ID("label"))
+	}
+	return row
+}
+
+// labelled stacks a field label, the control and an error message, the
+// layout every form control shares.
+func labelled(label string, control el.Element, errMsg string) el.Element {
+	if label == "" && errMsg == "" {
+		return control
+	}
+	box := el.Div().Gap(theme.SpaceSm).Items(el.Stretch)
+	if label != "" {
+		box.Child(el.Text(label).TextSize(theme.TextMd).TextColor(theme.Muted))
+	}
+	box.Child(control)
+	if errMsg != "" {
+		box.Child(el.Text(errMsg).TextSize(theme.TextSm).TextColor(theme.DangerText))
+	}
+	return box
+}
+
+// fieldFrame is the one box every text field in kit draws: same height,
+// padding and radius. Errors use a border; keyboard focus uses a subtle fill
+// unless the palette explicitly enables outlines. Change
+// how fields look here, not in each component. Frames around a text input
+// also call FocusOnPress, so a press anywhere in the frame focuses the text. A field that wraps (tags in a
+// multiple Combobox) grows past theme.ControlHeight.
+func fieldFrame(id string, focused, invalid, disabled, readOnly bool) *el.DivEl {
+	border := theme.Outline
+	switch {
+	case invalid:
+		border = theme.Danger
+	case focused && !disabled && theme.Outline.A > 0:
+		border = theme.Primary
+	}
+	bg := theme.Surface
+	if focused && !invalid && theme.Outline.A == 0 {
+		bg = theme.SubtleHover
+	}
+	if disabled || readOnly {
+		bg = theme.Subtle
+	}
+	return el.Div().ID(id).WFull().MinH(el.Dp(float32(theme.ControlHeight))).Row().Items(el.Center).Gap(theme.SpaceMd).Px(10).Py(theme.SpaceXs).
+		Rounded(theme.RadiusMd).Border(1, border).Bg(bg).Disabled(disabled)
+}
+
+// fieldText strips el.Input's own box so the text sits inside a fieldFrame
+// and shows the frame's background. The input still reaches caretRoom into
+// the frame's gap, text in place: an empty field draws its caret just before
+// the placeholder, which a box starting at the text clipped away.
+func fieldText(in *el.InputEl) *el.InputEl {
+	return in.Border(0, color.NRGBA{}).Bg(color.NRGBA{}).P(0).Pl(caretRoom).Ml(-caretRoom).MinH(el.Auto).Grow()
+}
+
+// caretRoom fits the caret drawn before a placeholder: a 1dp gap and a
+// caret one or two pixels wide.
+const caretRoom = 4
+
+// searchField is the search box of Select, Command, Settings and the like:
+// a fieldFrame with a search icon in front of the text, whose blank space
+// focuses the text (inputID, the input's ID).
+func searchField(cx *el.Context, id, inputID string, in *el.InputEl) *el.DivEl {
+	return fieldFrame(id, cx.FocusVisibleWithin(id), false, false, false).FocusOnPress(inputID).
+		Child(Icon(IconSearch).Size(16).Color(theme.Muted).Render(cx), fieldText(in))
+}

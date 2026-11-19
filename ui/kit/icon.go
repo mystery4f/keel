@@ -1,0 +1,184 @@
+package kit
+
+import (
+	"github.com/dyike/keel/gio/f32"
+	"github.com/dyike/keel/gio/op"
+	"github.com/dyike/keel/ui/core"
+	"github.com/dyike/keel/ui/el"
+	"image"
+	"image/color"
+	"math"
+
+	"github.com/dyike/keel/gio/unit"
+	giowidget "github.com/dyike/keel/gio/widget"
+	"github.com/dyike/keel/ui/theme"
+	"golang.org/x/exp/shiny/materialdesign/icons"
+)
+
+// IconName names a built-in icon. The zero value IconNone draws nothing and
+// takes no space, so an optional icon field can be left unset.
+type IconName uint8
+
+const (
+	IconNone IconName = iota
+	IconCheck
+	IconClose
+	IconPlus
+	IconSearch
+	IconCopy
+	IconChevronDown
+	IconChevronRight
+	IconInfo
+	IconWarning
+	IconError
+	IconUser
+	IconInbox
+	IconDone // a plain check mark, e.g. inside a checkbox
+	IconChevronLeft
+	IconMinus
+	IconStar
+	IconStarOutline
+	IconCalendar
+	IconClock
+	IconSettings
+	IconBell
+	IconLock
+	IconFolder
+	IconFile
+	IconArchive
+	IconReceipt
+	IconHome
+	IconTrash
+	IconEdit
+	IconMore // three dots, for overflow menus
+	IconExternalLink
+	IconBan
+	IconRetry
+	IconChevronUp
+	IconPhone
+	IconComputer
+)
+
+// IconView wraps a Gio vector icon. Labels belong to its containing control.
+type IconView struct {
+	svg            *svgIcon
+	originalColors bool
+	rotation       float32
+	icon           *giowidget.Icon
+	size           float32
+	color          *color.NRGBA
+	renderer       *iconRenderer
+}
+
+var iconData = [...][]byte{
+	IconChevronUp:    icons.NavigationExpandLess,
+	IconRetry:        icons.NavigationRefresh,
+	IconBan:          icons.ContentBlock,
+	IconCheck:        icons.ActionCheckCircle,
+	IconClose:        icons.NavigationClose,
+	IconPlus:         icons.ContentAdd,
+	IconSearch:       icons.ActionSearch,
+	IconCopy:         icons.ContentContentCopy,
+	IconChevronDown:  icons.NavigationExpandMore,
+	IconChevronRight: icons.NavigationChevronRight,
+	IconInfo:         icons.ActionInfo,
+	IconWarning:      icons.AlertWarning,
+	IconError:        icons.AlertError,
+	IconUser:         icons.SocialPerson,
+	IconInbox:        icons.ContentInbox,
+	IconDone:         icons.ActionDone,
+	IconChevronLeft:  icons.NavigationChevronLeft,
+	IconMinus:        icons.ContentRemove,
+	IconStar:         icons.ToggleStar,
+	IconStarOutline:  icons.ToggleStarBorder,
+	IconCalendar:     icons.ActionDateRange,
+	IconClock:        icons.ActionSchedule,
+	IconSettings:     icons.ActionSettings,
+	IconPhone:        icons.HardwareSmartphone,
+	IconComputer:     icons.HardwareComputer,
+	IconBell:         icons.SocialNotifications,
+	IconLock:         icons.ActionLock,
+	IconFolder:       icons.FileFolder,
+	IconFile:         icons.ActionDescription,
+	IconArchive:      icons.ContentArchive,
+	IconReceipt:      icons.ActionReceipt,
+	IconHome:         icons.ActionHome,
+	IconTrash:        icons.ActionDelete,
+	IconEdit:         icons.EditorModeEdit,
+	IconMore:         icons.NavigationMoreHoriz,
+	IconExternalLink: icons.ActionOpenInNew,
+}
+
+// decoded caches parsed icons: Icon is called on every Render. Only touched
+// under the frame lock.
+var decoded [len(iconData)]*giowidget.Icon
+
+func Icon(name IconName) *IconView {
+	if name == IconNone || int(name) >= len(iconData) {
+		return &IconView{size: 18}
+	}
+	if decoded[name] == nil {
+		ic, err := giowidget.NewIcon(iconData[name])
+		if err != nil {
+			panic(err) // All bundled icon data is known at build time.
+		}
+		decoded[name] = ic
+	}
+	return &IconView{icon: decoded[name], size: 18}
+}
+
+// VectorIcon supports custom Gio icons, including icons decoded by widget.NewIcon.
+func VectorIcon(icon *giowidget.Icon) *IconView { return &IconView{icon: icon, size: 18} }
+func (i *IconView) Size(dp float32) *IconView {
+	if dp > 0 && finiteNumber(float64(dp)) {
+		i.size = dp
+	}
+	return i
+}
+
+// Rotate rotates the icon clockwise around its layout center, in degrees.
+// It does not change layout size. Negative angles rotate counterclockwise;
+// non-finite values are ignored. A non-square or tightly cropped icon may paint
+// outside its original box, subject to ancestor clipping.
+func (i *IconView) Rotate(degrees float32) *IconView {
+	if finiteNumber(float64(degrees)) {
+		i.rotation = float32(math.Mod(float64(degrees), 360))
+	}
+	return i
+}
+
+func (i *IconView) Color(c color.NRGBA) *IconView { i.color = &c; return i }
+func (i *IconView) Render(*el.Context) el.Element {
+	c := theme.Text
+	if i.color != nil {
+		c = *i.color
+	}
+	// Keep the color captured by this Render, as the old closure did. A
+	// replacement never overwrites a renderer held by a cached/older element.
+	// Check the owner too: copying an IconView must not draw the original view.
+	if i.renderer == nil || i.renderer.view != i || i.renderer.color != c {
+		i.renderer = &iconRenderer{view: i, color: c}
+	}
+	return el.Widget(i.renderer).Size(el.Dp(i.size))
+}
+
+type iconRenderer struct {
+	view  *IconView
+	color color.NRGBA
+}
+
+func (r *iconRenderer) Layout(gtx core.C) core.D {
+	i, c := r.view, r.color
+	if i.icon == nil && i.svg == nil {
+		return core.D{}
+	}
+	size := gtx.Constraints.Constrain(image.Pt(gtx.Dp(unit.Dp(i.size)), gtx.Dp(unit.Dp(i.size))))
+	gtx.Constraints.Min, gtx.Constraints.Max = size, size
+	if i.rotation != 0 {
+		defer op.Affine(f32.Affine2D{}.Rotate(f32.Pt(float32(size.X)/2, float32(size.Y)/2), i.rotation*math.Pi/180)).Push(gtx.Ops).Pop()
+	}
+	if i.svg != nil {
+		return i.svg.layout(gtx, size, c, i.originalColors)
+	}
+	return i.icon.Layout(gtx, c)
+}

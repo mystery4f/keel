@@ -1,0 +1,29 @@
+package main
+
+import (
+	"fmt"
+	"github.com/dyike/keel/ui/core"
+	"github.com/dyike/keel/ui/el"
+	"github.com/dyike/keel/ui/kit"
+	"github.com/dyike/keel/ui/theme"
+)
+
+func init() {
+	registerSection("progress_circle", "feedback", func() core.Widget {
+		done := kit.ProgressCircle(demoText("Import", "导入")).Size(88)
+		done.SetValue(.42)
+		done.Child(el.ViewFunc(func(*el.Context) el.Element { return el.Text(fmt.Sprintf("%.0f%%", done.Value()*100)) }))
+		empty := kit.ProgressCircle(demoText("Not started", "未开始 Empty")).Size(40)
+		full := kit.ProgressCircle(demoText("Done", "已完成")).Size(40)
+		full.SetValue(1)
+		busy := kit.ProgressCircle(demoText("Sync", "同步")).Size(40)
+		busy.SetIndeterminate(true)
+		return el.Embed(el.ViewFunc(func(cx *el.Context) el.Element {
+			return el.Div().P(theme.SpaceXl).Gap(theme.SpaceLg).W(el.Dp(360)).MaxW(el.Full).Child(
+				el.Div().Row().Wrap().Items(el.Center).Gap(theme.SpaceLg).Child(done.Render(cx), empty.Render(cx), full.Render(cx), busy.Render(cx)),
+				el.Div().Row().Wrap().Gap(theme.SpaceSm).Child(
+					kit.Button("+10%", func() { done.SetValue(done.Value() + .1) }).Render(cx),
+					kit.Button(demoText("Reset", "重置"), func() { done.SetValue(0) }).Render(cx)))
+		}))
+	})
+}

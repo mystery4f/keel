@@ -1,0 +1,71 @@
+{{define "count"}}{{if .Current}}a.state.Count{{else}}a.count{{end}}{{end}}package main
+
+import (
+	"strconv"
+
+	"github.com/dyike/keel/ui/el"
+	"github.com/dyike/keel/ui/kit"
+	"github.com/dyike/keel/ui/theme"
+)
+
+// app is the whole interface: Render builds the view tree each frame, and
+// callbacks change fields that the next frame shows.
+//
+// Callbacks run under Keel's frame lock, so they may change fields directly.
+// Work in another goroutine, such as a network request, must hand its result
+// back through core.Update:
+//
+//	go func() {
+//		text := load()
+//		core.Update(func() { a.text = text })
+//	}()
+//
+// See https://github.com/dyike/keel/blob/main/docs/architecture.md#threading
+type app struct {
+{{- if .Current}}
+	name *kit.InputView
+	// state is what main.go keeps across keel run reloads: exported fields,
+	// encoded with encoding/json.
+	state struct{ Count int }
+{{- else}}
+	name  *kit.InputView
+	count int
+{{- end}}
+}
+{{if eq .Lang "zh-CN"}}
+func newApp() *app {
+	return &app{name: kit.Input("名字").Placeholder("输入你的名字")}
+}
+
+func (a *app) Render(cx *el.Context) el.Element {
+	greeting := "你好！"
+	if n := a.name.Value(); n != "" {
+		greeting = "你好，" + n + "！"
+	}
+	return el.Div().P(32).Gap(16).Items(el.Start).Child(
+		el.Text({{printf "%q" .Name}}).TextSize(24).Bold(),
+		el.Text("编辑 app.go 并保存，keel run 会自动重新编译并重启应用。").TextColor(theme.Muted),
+		a.name.Render(cx),
+		el.Text(greeting),
+		kit.Button("点了 "+strconv.Itoa({{template "count" .}})+" 次", func() { {{template "count" .}}++ }).Render(cx),
+	)
+}
+{{- else}}
+func newApp() *app {
+	return &app{name: kit.Input("Name").Placeholder("Enter your name")}
+}
+
+func (a *app) Render(cx *el.Context) el.Element {
+	greeting := "Hello!"
+	if n := a.name.Value(); n != "" {
+		greeting = "Hello, " + n + "!"
+	}
+	return el.Div().P(32).Gap(16).Items(el.Start).Child(
+		el.Text({{printf "%q" .Name}}).TextSize(24).Bold(),
+		el.Text("Edit app.go and save: keel run rebuilds and restarts the app.").TextColor(theme.Muted),
+		a.name.Render(cx),
+		el.Text(greeting),
+		kit.Button("Clicked "+strconv.Itoa({{template "count" .}})+" times", func() { {{template "count" .}}++ }).Render(cx),
+	)
+}
+{{- end}}

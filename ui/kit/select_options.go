@@ -1,0 +1,285 @@
+package kit
+
+import (
+	"image/color"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/dyike/keel/gio/io/key"
+	"github.com/dyike/keel/ui/base"
+	"github.com/dyike/keel/ui/el"
+	"github.com/dyike/keel/ui/locale"
+	"github.com/dyike/keel/ui/theme"
+)
+
+// SelectOption separates the stored value from its label and section title.
+type SelectOption struct {
+	Value, Label, Group string
+	Disabled            bool
+}
+type selectRow struct {
+	index int
+	group string
+}
+
+func (v *SelectView) SetEntries(options ...SelectOption) {
+	seen := map[string]bool{}
+	for _, option := range options {
+		if option.Value == "" || seen[option.Value] {
+			panic("kit.Select: empty or duplicate option value")
+		}
+		seen[option.Value] = true
+	}
+	v.setEntries(options)
+}
+func (v *SelectView) setEntries(options []SelectOption) {
+	v.entries = slices.Clone(options)
+	v.revision++
+	for i := range v.entries {
+		if v.entries[i].Label == "" {
+			v.entries[i].Label = v.entries[i].Value
+		}
+	}
+	if !v.offered(v.value) {
+		v.value = ""
+	}
+	for value := range v.values {
+		if !v.offered(value) {
+			delete(v.values, value)
+		}
+	}
+	if v.multiple && v.value == "" {
+		values := v.Values()
+		if len(values) > 0 {
+			v.value = values[len(values)-1]
+		}
+	}
+	v.active = -1
+}
+func (v *SelectView) Entries() []SelectOption { return slices.Clone(v.entries) }
+func (v *SelectView) SetOptionDisabled(value string, on bool) {
+	for i := range v.entries {
+		if v.entries[i].Value == value {
+			v.entries[i].Disabled = on
+			v.revision++
+		}
+	}
+}
+func (v *SelectView) Multiple() *SelectView {
+	v.multiple = true
+	v.SetValues([]string{v.value})
+	return v
+}
+func (v *SelectView) OnValuesChange(fn func([]string)) *SelectView { v.onValues = fn; return v }
+func (v *SelectView) Values() []string {
+	if !v.multiple {
+		if v.value != "" {
+			return []string{v.value}
+		}
+		return nil
+	}
+	var values []string
+	seen := map[string]bool{}
+	for _, option := range v.entries {
+		if v.values[option.Value] && !seen[option.Value] {
+			values = append(values, option.Value)
+			seen[option.Value] = true
+		}
+	}
+	return values
+}
+func (v *SelectView) SetValues(values []string) {
+	v.values = make(map[string]bool)
+	v.value = ""
+	for _, value := range values {
+		if value != "" && v.offered(value) {
+			v.values[value] = true
+			v.value = value
+			if !v.multiple {
+				break
+			}
+		}
+	}
+}
+func (v *SelectView) picked(value string) bool {
+	if v.multiple {
+		return v.values[value]
+	}
+	return value == v.value
+}
+func (v *SelectView) shownValue() string {
+	var labels []string
+	for _, value := range v.Values() {
+		label := value
+		for _, option := range v.entries {
+			if option.Value == value {
+				label = option.Label
+				break
+			}
+		}
+		labels = append(labels, label)
+	}
+	return strings.Join(labels, ", ")
+}
+func (v *SelectView) buildRows() {
+	if v.cached && v.cachedRevision == v.revision && v.cachedQuery == v.query {
+		return
+	}
+	v.cached, v.cachedRevision, v.cachedQuery = true, v.revision, v.query
+	v.rows = v.rows[:0]
+	group := ""
+	query := strings.ToLower(v.query)
+	for i, option := range v.entries {
+		if v.searchable && query != "" {
+			matched := strings.Contains(strings.ToLower(option.Label+" "+option.Value), query)
+			if v.match != nil {
+				matched = v.match(option, v.query)
+			}
+			if !matched {
+				continue
+			}
+		}
+		if option.Group != "" && option.Group != group {
+			v.rows = append(v.rows, selectRow{index: -1, group: option.Group})
+		}
+		group = option.Group
+		v.rows = append(v.rows, selectRow{index: i})
+	}
+	v.virtual.SetCount(len(v.rows))
+}
+func (v *SelectView) rowDisabled(i int) bool {
+	return v.rows[i].index < 0 || v.entries[v.rows[i].index].Disabled
+}
+func (v *SelectView) firstEnabled() int {
+	return base.List{Count: len(v.rows), Disabled: v.rowDisabled}.First()
+}
+func (v *SelectView) optionKey(cx *el.Context, e el.KeyEvent) bool {
+	if e.Modifiers != 0 {
+		return false
+	}
+	if key.Name(e.Name) == key.NameReturn || key.Name(e.Name) == key.NameSpace {
+		if e.State == el.KeyPress && v.active >= 0 && !v.rowDisabled(v.active) {
+			v.choose(v.entries[v.rows[v.active].index].Value)
+		}
+		return true
+	}
+	nav := base.List{Count: len(v.rows), Disabled: v.rowDisabled}
+	if s, ok := base.Text(e.Name, false); ok {
+		if e.State == el.KeyPress {
+			label := func(i int) string { return v.entries[v.rows[i].index].Label }
+			if i, found := v.typeahead.Find(time.Now(), s, v.active, nav, label); found {
+				v.active = i
+				v.virtual.ScrollTo(cx, i)
+			}
+		}
+		return true
+	}
+	i, ok := nav.Key(e.Name, v.active)
+	switch key.Name(e.Name) {
+	case key.NameDownArrow:
+		nav.Wrap = true
+		i = nav.Next(v.active, 1)
+	case key.NameUpArrow:
+		nav.Wrap = true
+		i = nav.Next(v.active, -1)
+	}
+	if ok && e.State == el.KeyPress && i >= 0 {
+		v.active = i
+		v.virtual.ScrollTo(cx, i)
+	}
+	return ok
+}
+func (v *SelectView) optionRow(cx *el.Context, i int) el.Element {
+	row := v.rows[i]
+	if row.index < 0 {
+		// Fill the group slot and sit at its bottom, next to the group it names.
+		return el.Div().H(el.Dp(v.optionHeight())).Px(theme.SpaceLg).Pb(theme.SpaceXs).Justify(el.End).Child(el.Text(row.group).Bold().TextSize(theme.TextSm).TextColor(theme.Muted))
+	}
+	option := v.entries[row.index]
+	selected := v.picked(option.Value)
+	rightMargin := float32(4)
+	if float32(len(v.rows))*v.optionHeight() > v.virtual.height {
+		rightMargin = scrollbarGutter
+	}
+	item := el.Div().Role("option").Name(option.Label).Value(option.Value).Selected(selected).Disabled(option.Disabled).H(el.Dp(max(1, v.optionHeight()-2))).My(1).Ml(4).Mr(rightMargin).Px(theme.SpaceMd).Row().Items(el.Center).Rounded(theme.RadiusSm).Focusable(false).TextSize(float32(theme.BodySize) * v.sizeRatio())
+	var content el.Element
+	if v.renderItem != nil {
+		content = v.renderItem(cx, SelectItemContext{Option: option, Index: row.index, Selected: selected, Active: i == v.active})
+	}
+	if content == nil {
+		content = el.Text(option.Label).MaxLines(1)
+	}
+	item.Child(el.Div().Grow().W(el.Dp(0)).Child(content), checkMark(cx, selected))
+	if selected {
+		item.Bg(theme.Highlight)
+	}
+	if !option.Disabled {
+		item.CursorPointer().OnClick(func() {
+			v.active = i
+			v.choose(option.Value)
+			if v.multiple {
+				cx.Focus(v.FocusID() + "/options")
+			}
+		}).Hover(func(s *el.Style) { s.Bg(theme.SubtleHover) })
+		// The keyboard's place is a background, like hover; a border would
+		// read as a second focus ring beside the search field's.
+		if i == v.active && !selected {
+			item.Bg(theme.Subtle)
+		}
+	}
+	return item
+}
+func (v *SelectView) list(cx *el.Context, id string) el.Element {
+	v.buildRows()
+	if v.active < 0 || v.active >= len(v.rows) || v.rowDisabled(v.active) {
+		v.active = v.firstEnabled()
+		if v.active >= 0 {
+			v.virtual.ScrollTo(cx, v.active)
+		}
+	}
+	panel := floating(theme.ElevationMd).Role("listbox").Name(v.a11y()).Py(theme.SpaceXs).Items(el.Stretch)
+	_, height := cx.ViewportSize()
+	limit := float32(240)
+	if v.menuHeight > 0 {
+		limit = max(64, v.menuHeight)
+	}
+	available := max(float32(1), min(limit, height-100)-2*theme.SpaceXs-2)
+	if v.menuWidth > 0 {
+		panel.W(el.Dp(v.menuWidth))
+	}
+	if v.searchable {
+		available = max(1, available-40)
+		panel.Child(el.Div().Px(theme.SpaceXs).Pb(theme.SpaceXs).Child(searchField(cx, id+"/searchbox", id+"/search", el.Input().ID(id+"/search").Name(locale.Current().Search).Placeholder(locale.Current().Search).Bind(&v.query).
+			OnChange(func(string) { v.active = -1; cx.ScrollTo(v.virtual.ID(), 0) }).
+			OnSubmit(func(string) {
+				if v.active >= 0 && !v.rowDisabled(v.active) {
+					v.choose(v.entries[v.rows[v.active].index].Value)
+				}
+			}).
+			OnKey(func(e el.KeyEvent) bool {
+				if key.Name(e.Name) != key.NameDownArrow {
+					return false
+				}
+				if e.State == el.KeyPress {
+					cx.Focus(id + "/options")
+				}
+				return true
+			}))))
+	}
+	v.virtual.rowH = v.optionHeight()
+	v.virtual.Height(min(available, max(v.optionHeight(), float32(len(v.rows))*v.optionHeight())))
+	options := el.Div().ID(id + "/options").Focusable(true).FocusStyle(func(s *el.Style) { s.BorderColor(color.NRGBA{}); s.Bg(color.NRGBA{}) }).Items(el.Stretch).OnKey(func(e el.KeyEvent) bool { return v.optionKey(cx, e) })
+	if len(v.rows) == 0 {
+		empty := el.Div().MaxH(el.Dp(available)).ScrollY().Px(theme.SpaceLg).Py(theme.SpaceSm)
+		if v.empty != nil {
+			empty.Child(v.empty.Render(cx))
+		} else {
+			empty.Child(el.Text(locale.Current().NoMatches).TextColor(theme.Muted))
+		}
+		options.Child(empty)
+	} else {
+		options.Child(v.virtual.Render(cx))
+	}
+	return panel.Child(options)
+}

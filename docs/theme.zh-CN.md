@@ -1,0 +1,192 @@
+# 主题
+
+[English](theme.md) | 简体中文
+
+`ui/theme` 管颜色、尺寸刻度和字体。组件每次 Render 都从 theme 读取，所以切换主题后所有窗口下一帧就换成新样子，不用重建视图。
+
+## 切换主题
+
+```go
+theme.Use("nord")          // 按名字应用已注册的主题，并记住名字
+theme.CurrentName()        // "nord"
+theme.Names()              // 已注册的全部名字，可以直接给主题选择框用
+theme.Apply(myPalette)     // 应用一个没有名字的调色板
+```
+
+`Use` 和 `Apply` 要在打开窗口前调用，或者在界面回调里调用（持有帧锁）。其他 goroutine 用 `core.Update(func() { theme.Use("dark") })`。
+
+内置主题：`light`、`dark`、`nord`、`paper`、`solarized-dark`、`high-contrast`，以及带渐变的 `aurora`。
+
+## 调色板与缓存
+
+组件默认不绘制装饰描边。`Palette.Outline` 默认为透明色，`Border` 继续用于分隔线和显式边框。需要开启默认外框时，设置 `p.Outline = p.Border` 后应用主题；只改局部可用 `cx.Themed(p, view)`。组件的 `Bordered(true)`、Outline 外观，以及样式回调中的 `.Border(1, theme.Border)` 仍可显式开启描边。输入框的键盘焦点默认用浅底色提示；开启 Outline 后恢复焦点描边。校验错误保留状态提示。
+
+设置 `Palette.Frameless` 可去掉元素外框，包括焦点边框。键盘和输入框焦点改用背景填充，单边分隔线保留。该选项默认关闭，并随局部调色板生效。
+
+`Light()`、`Dark()`、`Current()` 返回调色板副本。自定义时修改副本，再用 `Apply` 替换全部颜色；零值字段也会应用。
+
+```go
+p := theme.Light()
+p.Primary = theme.RGB(0x15803d)
+theme.Apply(p)
+```
+
+`Apply` 递增 `theme.Revision()`，使 `cx.Cache` 失效并请求重绘。自己的渲染缓存也要把版本号纳入键。颜色应在 Render 时读取；已经构造好的静态元素、自定义固定色和 Markdown 独立配色需要应用自行更新。直接修改包级颜色变量不会同步 Material、刷新缓存或请求重绘。
+
+| 颜色 | 浅色默认值 | 用在哪里 |
+| --- | --- | --- |
+| `Bg` | `#f5f6f8` | 窗口背景 |
+| `Surface` | `#ffffff` | 卡片、输入框底色 |
+| `Outline` | 透明 | 默认组件外框，显式设色后开启 |
+| `Border` | `#e3e5e8` | 边框、分隔线 |
+| `Text` / `Muted` | `#1f2328` / `#6b7280` | 正文 / 次要文字、占位文字 |
+| `Primary` / `PrimaryHover` / `PrimaryText` | `#2563eb` / `#1d4ed8` / `#1d4ed8` | 主按钮、焦点边框 / 悬停 / 链接等蓝色文字 |
+| `Danger` / `DangerHover` / `DangerText` | `#dc2626` / `#b91c1c` / `#b91c1c` | 危险按钮 / 悬停 / 错误文字 |
+| `Success` / `Warning` / `Info` | `#15803d` / `#a16207` / `#0369a1` | 状态正文、图标 |
+| `Subtle` / `SubtleHover` | `#eceef1` / `#e2e5e9` | 次要按钮、悬停底色 |
+| `OnColor` | `#ffffff` | 实心主色、危险色背景上的文字 |
+| `Highlight` | `#dbeafe` | 选中行、选中项 |
+| `Scrim` | 40% 黑 | 模态浮层后面的遮罩 |
+| `CodeBg` / `CodeText` | `#f0f1f3` / `#1f2328` | 代码块 |
+| `Chart` | 8 个分类色 | 图表系列颜色，按顺序使用；浅色和深色各一套，均通过色觉缺陷校验 |
+
+`OnColor` 用于 Primary / Danger 实心背景，不保证适合所有状态色背景。成功、警告和提示颜色可以用于正文和图标。
+
+## 主题文件
+
+主题文件是 JSON：选一个基础主题，只写要改的颜色。颜色名就是 `Palette` 的字段名，不区分大小写，值可以写成 `#rgb`、`#rgba`、`#rrggbb` 或 `#rrggbbaa`。
+
+```json
+{
+  "name": "forest",
+  "base": "light",
+  "colors": {
+    "bg": "#e8f3ea",
+    "primary": "#2f7d4a",
+    "primaryHover": "#26693d",
+    "chart": ["#2f7d4a", "#c2410c"]
+  }
+}
+```
+
+```go
+name, palette, err := theme.ParseTheme(data)
+theme.Register(name, palette)
+```
+
+`chart` 最多 8 个颜色，没写的沿用基础主题。写错颜色名或颜色值时 `ParseTheme` 返回错误。
+
+## 渐变
+
+`bgGradient` 给窗口背景，`primaryGradient` 给主按钮、进度条和用户的聊天气泡：
+
+```json
+"bgGradient":      {"from": "#10142b", "to": "#1f1843", "angle": 120},
+"primaryGradient": {"from": "#7c5cff", "to": "#2fb8ff", "angle": 0}
+```
+
+`angle` 的单位是度：0 从左到右，90 从上到下。主按钮悬停和按下时整体压暗，渐变不消失。
+
+渐变只是外观，`Bg` 和 `Primary` 仍然是这两处的纯色，选中边框、焦点框、链接等其他地方都用纯色。所以要把 `bg`、`primary` 设成渐变里的某个颜色，看起来才协调。没设渐变（零值）时完全不影响原来的纯色。
+
+自己画的元素也能用：`el.Div().BgGradient(theme.Gradient{From: a, To: b, Angle: 90})`。传零值什么都不改，所以可以直接传 `theme.PrimaryGradient`，没配渐变的主题下它就是纯色。之后再调 `Bg` 会替换掉渐变。
+
+## 监听主题目录
+
+设计师改主题文件时，不用重启程序就能看到效果：
+
+```go
+w, err := theme.WatchThemes("./themes", time.Second, func(names []string, err error) {
+    if err != nil {
+        log.Print(err) // 某个文件写错了；其他文件照常加载
+    }
+})
+defer w.Stop()
+theme.Use("forest")
+```
+
+- 启动时立刻注册目录里所有的 `*.json`，所以紧接着就能 `Use` 它们。
+- 之后按间隔检查文件的修改时间。有变化的文件在下一帧（持有帧锁时）重新注册；正在使用的主题（`CurrentName`）变了，会立刻重新应用。
+- 用轮询而不是文件系统事件，不需要额外依赖，各平台行为一致。
+- 删掉文件不会注销已注册的主题。
+- 组件库示例可以这样试：`go run ./examples/components -themes ./mythemes -theme forest`。
+
+## 尺寸刻度
+
+组件从刻度里取值，不自己写数字，同一种用途在各处看起来一样，要改设计也只改一处。
+
+| 刻度 | 常量 |
+| --- | --- |
+| 间距（dp） | `SpaceXxs` 2、`SpaceXs` 4、`SpaceSm` 6、`SpaceMd` 8、`SpaceLg` 12、`SpaceXl` 16、`Space2xl` 24、`Space3xl` 32 |
+| 圆角（dp） | `RadiusSm` 4、`RadiusMd` 6、`RadiusLg` 8、`RadiusXl` 12、`RadiusFull` |
+| 字号（sp） | `TextXs` 11、`TextSm` 12、`TextMd` 13、`TextControl` 14、`TextBody` 15、`TextLg` 17、`TextXl` 20、`TextHeading` 22 |
+| 阴影 | `ElevationSm`、`ElevationMd`、`ElevationLg`，颜色是 `theme.Shadow` |
+
+间距的用法：图标和文字之间用 `SpaceSm`，一行里的控件之间用 `SpaceMd`，控件内边距和表单字段之间用 `SpaceLg`，卡片内边距用 `SpaceXl`，对话框和页面内边距用 `Space2xl`。
+
+```go
+el.Div().Row().Gap(theme.SpaceMd).P(theme.SpaceXl).Rounded(theme.RadiusLg)
+```
+
+kit 的间距都已改用这套刻度；剩下的 10、14、20dp 是刻意的视觉微调，比如让输入框文字和按钮文字对齐。
+
+## 局部主题
+
+一个窗口里的某一块想换颜色（比如浅色窗口里的深色侧栏），用 `cx.Themed`，见[元素与视图 · 局部主题](el.zh-CN.md#局部主题)。
+
+自己写 Gio 绘制代码时，可以用 `theme.Scope(p)` 临时替换调色板，调用返回的函数恢复；Scope 不触发重绘或改变版本号。局部主题不会自动跟随系统外观。
+
+## 字体
+
+`theme.Face` 指定正文的字体优先级，逐字形回退；`theme.MonoFace` 指定等宽字体优先级。桌面版优先使用系统字体，兜底字体只在系统没有对应字体时使用。
+
+`MonoFace` 优先尝试等宽字体，缺失的中文等字形复用完整的 `Face` 回退列表，终端中文因此和正文使用同一款中文字体，不会落到 Arial Unicode MS 等任意汉字回退字体；拉丁文字保留等宽字体。在 macOS 上，Keel 的 go-text 副本还会索引系统字体资源目录（`/System/Library/AssetsV2`），苹方就在其中；使用上游 go-text 时中文回退到冬青黑（Hiragino Sans GB）。
+
+`theme.LoadFonts(data...)` 接收 TTF、OTF、TTC 文件的字节内容，加载后重绘所有窗口。浏览器通过 `theme.FetchFonts("font.ttf")` 下载并加载；中文字体准备见 [在浏览器里运行](web.zh-CN.md#构建)。
+
+`BodySize` / `SmallSize` / `HeadingSize` 分别为 15 / 13 / 22sp，标准单行字段高 `ControlHeight`（36dp）。直接使用 Gio 绘制时可复用 `theme.Material` 的字形排版器。
+
+### 平台文字渲染（macOS）
+
+使用 Keel 的 Gio 和 go-text 副本时（见 `third_party/README.zh-CN.md`），macOS 上纯色文字由 CoreText 绘制，与原生应用和 WebKit 一致：同样的抗锯齿、笔画加粗和 gamma。此前 Gio 的矢量轮廓在线性光空间混合，看起来偏细、发灰。字形排版、布局和度量仍由 Gio 负责，只改变字形像素。标签、输入框、富文本区间、Markdown、代码编辑器、闪光文字和 `GlyphRenderer` 都会使用它。CoreText 画不了的文字（内存中构建的字体、彩色表情、超过 160 px 的字号）仍用矢量轮廓。字形缓存最多 128 页 256×256（32 MiB）。路径裁剪或透明度图层需要独立着色纹理时，小页面将每份颜色副本限制在 256 KiB。
+
+自定义绘制可用 `theme.PaintGlyphs(ops, shaper, glyphs, color, origin)` 以同样方式绘制一行已排版的字形；`theme.PlatformText(shaper)` 报告某个排版器是否使用它。`theme.UsePlatformText(false)` 或环境变量 `KEEL_TEXT=vector` 可切回矢量轮廓做对比。使用上游 Gio 时没有这些挂钩，文字保持矢量轮廓。
+
+## 系统减少动画
+
+macOS 运行 `window.Main()` 后默认跟随系统“减少动态效果”，包括运行时变化。应用可以覆盖或恢复这个偏好：
+
+```go
+theme.SetReducedMotion(true) // 显式关闭动画
+theme.FollowSystemMotion()   // 恢复跟随最近的系统值
+```
+
+在 UI 回调或 `core.Update` 内调用。自动化模式使用显式覆盖，保持截图稳定；其他平台默认允许动画，应用仍可关闭。
+
+### 字形图片缓存
+
+自定义终端绘制器可以按需启用 `theme.GlyphAtlas`。每帧先调用 `BeginFrame(shaper)`，为所有文字段调用 `Prepare(params, glyphs, color)`，再调用 `Commit()` 和 `Paint(ops, params, glyphs, color)`。只准备当前帧，不预计算后续画面。发生变化的页面每帧生成一个不可变的 `ImageOp`；绘制器关闭时调用 `Release()`。
+
+调用方应使用整数像素平移，字号已换算为物理像素，并且不额外缩放或旋转。其他变换使用 `GlyphPainter`。复杂文字段、半透明颜色、GPU 不可用或缓存超限时回退到矢量绘制；彩色位图字形保留 Gio 的位图绘制。
+
+页面上限为八张 512×512 RGBA 图片（8 MiB），掩码上限为 2 MiB、4096 个条目，每个掩码最多缓存八种颜色。旧页面快照和 GPU 副本还会占用额外内存；`Stats()` 提供当前 CPU 缓存占用、绘制次数和成功的掩码批次数。新掩码每批最多 64 个，在 512×512 临时画布的独立 64×64 区域内生成，共用一次 GPU 提交和读回；临时 RGBA 读回缓冲在释放前额外占用 1 MiB。第一帧同步准备所需掩码；后续每帧最多准备 32 个新掩码，首帧生成完成后释放临时 GPU 和读回缓冲；后续字形重建临时资源后，连续 60 帧没有新掩码再释放。静止的自定义绘制器也可在 `Commit()` 后串行调用 `ReleaseScratch()`；已缓存的掩码和图片页保留，新字形会按需重建临时资源。`SubpixelPhases` 是可选的位置取整，与 `GlyphPainter` 有相同的文字质量取舍。
+
+### 自定义字形绘制入口
+
+`GlyphRenderer` 统一管理现有图集和矢量缓存。每个视图保留一个实例；文字排版并确定字形位置后，在准备和绘制阶段使用同一份 `GlyphRun`：
+
+```go
+renderer.BeginFrame(shaper)
+run := theme.GlyphRun{Params: params, Glyphs: glyphs, Color: color, Position: baseline}
+renderer.Prepare(run) // 先准备所有可见文字段，再 Commit
+renderer.Commit()
+renderer.Paint(ops, run)
+```
+
+`Position` 是物理像素单位的基线原点。水平小数位置按四种像素相位写入掩码，垂直小数位置以 1/64 像素精度按相位缓存，避免平移图片时再次插值，边缘可能比旧矢量覆盖纹理的小数平移更清晰。复杂文字、半透明颜色、GPU 不可用和预算耗尽时沿用已有回退。排版、裁剪和语义文字由调用方负责；额外缩放或旋转应直接使用 `GlyphPainter`。字形切片必须保留到绘制结束。
+
+自定义绘制器按需分配最多 32 张图片页（32 MiB），每个掩码最多缓存 32 种颜色，掩码仍受 2 MiB、4096 条目限制；独立 `GlyphAtlas` 保留八页、八种颜色的默认预算。待生成的掩码按垂直相位分批提交；相位改变时重建临时 GPU 覆盖缓存，避免 Gio 在不同小数平移之间错误复用覆盖。
+
+视图关闭或替换时调用 `Release()`；空闲时可以在 `Commit()` 后调用 `ReleaseScratch()`，释放临时栅格化资源。字体变化会自动清理两套缓存。`Stats()` 提供图集预算和绘制计数；`BenchmarkGlyphRendererScrolling` 对比变化的文字网格与整段矢量绘制，在 Keel 中复现下游性能回归。
+
+CoreText 按所选 sfnt 字体的 PostScript 名称匹配，不按描述符数组下标取字体。可变字体会在该数组中展开为多个命名实例，因此 TTC 字体编号可能错指另一地区或字重。无法精确匹配时回退到轮廓绘制。系统字体扫描会收录其他轴保持默认值的命名字重实例。排版器应用对应的变体坐标，并把实例身份传给 CoreText，因此 Regular 请求可以选中苹方简体 Regular，而不是字体文件默认的 Medium。缺少精确 PostScript 身份的实例仍用轮廓绘制；此接口不支持任意变体轴选择。

@@ -1,0 +1,267 @@
+# Windows
+
+English | [简体中文](app.zh-CN.md)
+
+The `ui/window` module is responsible for: opening, closing, bringing to front, window shortcut keys, and directly rendering to PNG without opening the window.
+
+## Open a window
+
+```go
+w := window.Open(window.Options{
+    Title:   "Settings",
+    Width:   420,          // dp, 0 means 640
+    Height:  340,          // dp, 0 means 480
+    Content: el.Root(page), // core.Widget, usually el.Root(view)
+    Shortcuts: map[string]func(){
+        "mod+s": save,
+        "esc":   func() { w.Close() },
+    },
+    OnClose: func() { log.Print("Settings window closed") },
+})
+window.Main()
+```
+
+| Field | Description |
+| --- | --- |
+| `Title` | Window title |
+| `Width`, `Height` | Initial size in dp (1dp = 2 pixels on a 2x screen). Users can drag to change |
+| `Content` | Window content, usually `el.Root(view)`: fills the window, scrolling and margins are determined by the view itself. Others `core.Widget` is placed in the root view with its own scroll bar, leaving 24dp margins on all sides and background color `theme.Bg` |
+| `Overlay` | A layer covering the entire window, used for custom Gio content that does not use el; `cx.Overlay` is used for dialog boxes and menus of el views. It should take up no space when there is nothing to display |
+| `Shortcuts` | The shortcut key that takes effect when the window gets focus, see below for the writing method |
+| `OnClose` | Called after the window is destroyed, running in the lock, you can directly modify the component |
+| `KeepState` | A pointer to application state that survives `keel run` reloads: exported fields, JSON-encoded before the reload and decoded by `Open` after it, all or nothing. Unused outside `keel run`; see [Getting started · Run](getting-started.md#run) |
+| `Frameless` | Hide the system title bar. The content starts from the top edge of the window. The application draws the title bar by itself, usually using [kit.TitleBar](kit/title_bar.md). When not set, if the synthesizer on Linux does not draw a title bar (WSLg, GNOME Wayland), keel will draw a title bar following the theme and font |
+| `TopMost` | Keep a launcher or utility above ordinary windows. This does not activate the app. Call `Raise()` when showing a resident app in response to a hotkey. |
+
+`window.Open` can be called before `window.Main()` or in any callback to open a new window at runtime.
+
+The new window will be centered by default after it is first displayed, and will not be repositioned by subsequent dragging, zooming, and bringing it to the front. macOS is centered according to the available area of the screen after deducting the menu bar and Dock, including the system title bar; the same applies to borderless windows. Other platforms ask Gio for centering, and the final position is determined by the platform and window manager.
+
+`window.Main()` must be called in the `main` goroutine and will not return. The process exits when the last window is closed.
+
+## macOS glass backdrop
+
+Enable `Options.Glass` and leave the intended glass areas transparent:
+
+```go
+page := el.Root(el.ViewFunc(func(*el.Context) el.Element {
+    return el.Div().Row().Bg(color.NRGBA{}).Child(
+        el.Div().W(el.Dp(220)).P(20).Child(el.Text("Glass sidebar")),
+        el.Div().Grow().Bg(theme.Bg).P(24).Child(el.Text("Opaque content")),
+    )
+}))
+window.Open(window.Options{
+    Title: "Glass", Width: 900, Height: 600,
+    Glass: &window.GlassOptions{Style: window.GlassRegular, CornerRadius: 20},
+    Content: page,
+})
+window.Main()
+```
+
+Import `image/color` for the transparent color. `el.Root` supplies a theme background unless its outer element explicitly sets `Bg(color.NRGBA{})`. Opaque containers hide glass, so the main content can remain opaque while a sidebar or toolbar exposes the backdrop.
+
+`GlassRegular` and `GlassClear` use `NSGlassEffectView` on macOS 26+ when built with a macOS 26+ SDK. Older systems or SDKs fall back to `NSVisualEffectView`. `GlassFrosted` always uses traditional vibrancy. `CornerRadius` is in dp; zero keeps the system's default glass curvature. Invalid styles, negative radii and non-finite radii panic.
+
+The AppKit material occupies the native window root and samples windows behind the application. Gio draws text and layouts into its transparent Metal layer inside that root and keeps input handling. The linear half-float surface preserves translucent colors and dark-tone precision. `GlassSupported()` reports native backdrop support in this build; `LiquidGlassSupported()` reports Liquid Glass support. Windows, Linux, browsers, iOS and `-tags=nometal` builds retain the opaque theme background. Windows without `Glass` keep their existing rendering path.
+
+The material follows native appearance and system accessibility settings and stays active when the window loses key status; choose a matching Go palette for the foreground. This API covers the window content area; it does not provide per-control refraction or glass morphing. Off-screen `Screenshot` and automation images cannot include native compositor effects. Verify those in a real window.
+
+```sh
+go run ./examples/glass -backdrop
+go run ./examples/glass -style clear -dark
+go run ./examples/glass -style frosted
+go run ./examples/glass -opaque
+```
+
+Add `-lang zh-CN` to any command above for the Chinese demo UI.
+
+`-backdrop` opens a colored reference window behind the demo. The demo supports navigation, light/dark appearance and additional Clear/frosted comparison windows.
+
+## Idle heap reclamation
+
+Keel returns unused Go heap pages to the OS once its windows are idle. Startup alone (reading the system's font index, the first layouts) leaves tens of megabytes of freed heap that the Go runtime would otherwise keep for minutes, and the OS counts all of it: on macOS, the hello example idles at about half the memory with it. Applications with latency-sensitive background work can opt out before opening windows:
+
+```go
+window.SetIdleMemoryReclaim(false)
+```
+
+This is a process-wide policy, enabled by default. After two seconds without a Keel UI frame or callback, it returns unused Go heap pages to the OS if at least 8 MiB remain unreturned. It also collects when heap objects occupy at least 8 MiB and at least 8 MiB have been allocated since the last idle collection, so unreachable startup objects are collected even when the runtime has already returned its known idle pages. It checks activity across all Keel windows, avoids running during UI callbacks, and limits collection to once every 5 seconds. A static window does not redraw or keep collecting periodically. Passing `false` also cancels pending work.
+
+The policy runs Go's `debug.FreeOSMemory`, including a collection; it does not change `GOGC` or `GOMEMLIMIT`, and it does not free live caches or GPU textures. Collection can briefly pause other goroutines, and background work outside Keel is not an idle signal. Turn it off for latency-sensitive background workloads, after measuring interaction latency and memory on target devices.
+
+## App icons
+
+`window.SetIcon(png)` sets the application icon when the program is running. The parameter is the full square PNG original image (the same as the `appicon.png` of the scaffolding project), and the shape is cut according to the specifications of each platform:
+
+- **macOS**: Dock icon, Apple's continuous rounded corners and shadow.
+- **Windows**: The title bar and taskbar buttons of each window are sized according to the DPI of the window.
+- **Linux X11**: `_NET_WM_ICON` per window.
+- **Linux Wayland, Browser**: Not processed. Wayland uses the synthesizer to find the installed `.desktop` file by app_id to get the icon (the installation package generated by `keel build` will be installed), and the browser uses the page icon.
+
+Packaged apps carry their own icon. During development, `keel run` reads `icon`, `icon_mask` and the platform entry under `icons` from `keel.json` and applies the finished icon when the first window opens. It needs no application bundle or extra application code. Plain `go run` can use `SetIcon`; the scaffold embeds `appicon.png` and calls it. An explicit `SetIcon` takes precedence over the CLI icon, applies to existing and future windows, and can change the icon at any time.
+
+## Window API
+
+| Method | Description |
+| --- | --- |
+| `Close()` | Equivalent to the user clicking the close button |
+| `Raise()` | Bring window to front |
+| `Activate(token)` | Use the activation token given by other programs (such as `Activation.Token` when the system notification is clicked) to bring the window to the front. You can use the window manager's anti-grabbing focus; Wayland uses xdg-activation, and X11 writes the startup ID and requests activation. Other platforms or empty tokens are equivalent to `Raise` |
+| `WaylandDisplay()` | wl_display of this window under Linux Wayland, nil in other cases; handed to `native/clipboard.UseWaylandDisplay` when reading the clipboard |
+| `Minimize()` | Minimize to Dock or taskbar |
+| `ToggleMaximize()` | Maximize (zoom on macOS), restore when maximized |
+| `Maximized()` | Whether it is currently maximized, read in the UI code |
+| `Frameless()` | Whether to have a borderless window |
+| `Closed() bool` | Whether the window has been destroyed. Called in a callback or `core.Update` |
+
+`Close`, `Raise`, and `Activate` are asynchronous: the call returns immediately and the action is not executed until the current callback ends. So if you read `w.Closed()` immediately after `w.Close()`, you still get `false`. They are designed this way to avoid deadlocks, for the reasons described in [Architecture · Cannot wait for main thread](architecture.md#avoid-waiting-for-the-main-thread-while-holding-the-lock) within a lock.
+
+The window cannot be reopened after it is closed. How to write "only one setting window remains at the same time":
+
+```go
+var settings *window.Window
+
+openSettings := func() {
+    if settings != nil && !settings.Closed() {
+        settings.Raise()
+        return
+    }
+    settings = window.Open(window.Options{Title: "Settings", Content: settingsPage()})
+}
+```
+
+See `examples/components/multiwindow.go` for a complete example.
+
+## Shortcuts
+
+The writing method is `modifier+key`, which is not case sensitive:
+
+| Modifier key | Meaning |
+| --- | --- |
+| `mod` | ⌘ on macOS, Ctrl on Windows and Linux. Use it first for cross-platform shortcut keys |
+| `cmd` / `command` / `super` | ⌘ |
+| `ctrl` / `control` | Ctrl |
+| `shift` | Shift |
+| `alt` / `option` | Alt / ⌥ |
+
+Keys can be single characters (`a`, `,`, `1`), `f1`–`f12`, or `esc`, `enter`, `space`, `tab`, `backspace`, `delete`, `up`, `down`, `left`, `right`.
+
+Examples: `"mod+,"`, `"mod+shift+s"`, `"esc"`, `"f5"`. Wrong writing will cause panic at `window.Open`, because this is a configuration hard-coded in the code and should be exposed during development.
+
+Window shortcut keys only take effect when the window has focus. To trigger when another app is in the foreground, use [`native/hotkey`](native.md#hotkey-global-shortcut-key).
+
+## Offscreen screenshots
+
+```go
+err := window.Screenshot(content, 640, 480, "out.png")
+```
+
+Render `content` to PNG using the same root view as the window (background, margins, scroll), the size unit is dp, and the output image is scaled by 2x, the above example results in 1280×960 pixels. No `window.Main()` required and no pop-ups. use:
+
+- Illustrate documents and PR;
+- After changing the style, compare the before and after screenshots to confirm that there are no unexpected changes (see [Test](testing.md#screenshot-comparison)).
+
+The screenshot only renders one frame, and interactive states such as hovering and pressing are not visible.
+
+## Application menus and system appearance
+
+Applications configure menus entirely in Go; Keel owns the platform bridge. `MenuItem` supports nested children, separators, shortcuts, checked/disabled states, standard editing actions and custom callbacks.
+
+```go
+menu, err := window.NewMenuBar(window.MenuItem{
+    Title: "Shell",
+    Children: []window.MenuItem{
+        {ID: "new-tab", Title: "New tab", Shortcut: "mod+t", OnSelect: newTab},
+        {Separator: true},
+        {ID: "copy", Title: "Copy", Shortcut: "mod+c", Action: window.MenuCopy},
+    },
+})
+if err != nil { panic(err) }
+if err := menu.Install(); err != nil { panic(err) }
+_ = menu.UpdateItem("new-tab", func(item *window.MenuItem) {
+    item.Title = "New session"
+    item.Disabled = busy
+})
+```
+
+`mod` means Command on macOS and Ctrl elsewhere. `OnSelect` runs in the UI update queue and overrides `Action`. Standard actions include copy, cut, paste, select all, undo and redo, forwarded to the focused native view on macOS. Menu roles identify application, edit, window, help and services menus without fixing their contents.
+
+Use `SetApplicationMenu` for a one-time installation or retain a `NewMenuBar` controller for runtime changes. `SetItems` replaces the model; `UpdateItem` edits one item. Validation failures leave the existing model unchanged. Explicit IDs permit targeted updates; omitted IDs are generated. `Items` returns a copy suitable for a custom Go menu renderer; call `Invoke` from UI callbacks. Disabled ancestors also disable their descendants.
+
+`NativeApplicationMenu()` reports native backend availability: macOS uses AppKit, Windows uses Win32. Linux automatically draws an in-window menu compatible with both X11 and Wayland, without requiring a desktop global-menu service. All three use the same Go model for submenus, separators, checks, disabled states, shortcuts and runtime updates.
+
+`Options.MenuDisplay` defaults to `MenuDisplayAuto`. Decorated Windows windows use Win32 menus with system-managed height and DPI scaling. Frameless Windows windows automatically use Keel-drawn menus, because Gio hides the non-client area that contains a native menu. Choose `MenuDisplayWindow` to force a Keel-drawn menu, or `MenuDisplayHidden` to render `Items` yourself. The macOS system menu remains application-wide and is unaffected by the per-window setting. In-window menus support mouse selection, F10 / Alt+M, arrow navigation, Enter, Escape and outside-click dismissal. Long menus scroll vertically; top-level labels truncate in narrow windows without a horizontal scrollbar.
+
+Standard editing actions preserve editor focus. Keel inputs, text areas and rich document editors handle copy, cut, paste, select all, undo and redo, respecting password and read-only restrictions. Custom editors call `core.NextEditAction(gtx, focusTag)` during Layout and apply their own semantics; terminals can handle copy, paste and select all without sending undo as shell control characters. `OnSelect` still overrides standard actions. Application shortcuts are not global hotkeys.
+
+`SystemAppearance()` reads the system light/dark preference on macOS and Windows. Linux reads the desktop portal asynchronously and caches it, initially falling back to light. `SetNativeAppearance(window.AppearanceDark)` selects native chrome style, while `AppearanceSystem` restores the system setting. It does not replace the application's custom Go palette. Query `NativeAppearanceSupported()` for capability; only macOS currently supports changing native chrome. Applications remain free to use `theme.Apply` for their own themes.
+
+Native test fixtures are available only with `-tags=keelnativeqa`, for menu, input-method and application-icon regression checks. Normal builds do not include those test APIs.
+
+
+### Menu icons and animation
+
+`NewMenuIcon(artwork, template)` freezes an `image.Image` (1..256 pixels per axis). Reuse the returned `*MenuIcon` in `MenuItem.Icon`; replacing or removing the pointer through `UpdateItem` updates the native menu. `Image()` returns a copy. Artwork fits a 16dp box without changing its aspect ratio; use 32px or larger sources for high DPI. Template icons use the alpha mask with the system text color on AppKit, and the current enabled/disabled text color in Keel menus. Windows displays the original pixels; query `w.MenuFeatures().TemplateIcons` before choosing artwork.
+
+```go
+icon, err := window.NewMenuIcon(artwork, true)
+if err != nil { panic(err) }
+_ = menu.UpdateItem("new-tab", func(item *window.MenuItem) { item.Icon = icon })
+_ = menu.SetWindowAnimation(window.MenuAnimation{
+    Duration: 180 * time.Millisecond,
+    Offset: 6, // dp, eased to zero while opacity rises
+})
+features := w.MenuFeatures()
+menu.CancelTracking(false) // asynchronous; also safe in a UI callback
+```
+
+`SetWindowAnimation` configures **Keel-rendered** menu opening, including submenus. Zero duration preserves immediate opening; duration must be 0..10s and offset 0..128dp. Animation respects `theme.ReducedMotion` and requests frames only while running. Shared template icons cache their enabled and disabled variants separately. Icons are copied/encoded on construction, not during layout.
+
+`MenuBar.CancelTracking(animated)` dismisses this installed controller's menus across windows; calls on an uninstalled controller do nothing. Native cancellation is posted directly to the OS thread without waiting for UI frames. Window menus and Win32 dismiss immediately; AppKit chooses [cancelTracking](https://developer.apple.com/documentation/appkit/nsmenu/canceltracking()) or [cancelTrackingWithoutAnimation](https://developer.apple.com/documentation/appkit/nsmenu/canceltrackingwithoutanimation()) according to the argument. Native opening follows the OS and is independent of `SetWindowAnimation`.
+
+| Presentation | Icons | Template tint | Opening control | Animated dismissal |
+| --- | --- | --- | --- | --- |
+| macOS AppKit application menu | Yes | Yes | OS | `CancelTracking(animated)` |
+| Windows Win32 menu bar | Yes | Original pixels | OS | Immediate |
+| Keel window menu (all desktop platforms) | Yes | Yes | `SetWindowAnimation` | Immediate |
+
+`w.MenuFeatures()` reports `Native`, `Icons`, `TemplateIcons`, `WindowAnimation`, `NativeDismissAnimation` and `CancelTracking` for the selected window presentation. Hidden window menus report no features; macOS's application-wide menu still exists independently. Tray menus use the separate [native/tray API](../native/tray/README.md).
+
+Run `go run ./examples/components`, select **Menu**, then install the native menu or open the animated window-menu preview. The preview includes template/color icons, a checkmark, a disabled item and a nested menu. Automated snapshots expose the container as `menu` and its actions as `menuitem`/`menuitemcheckbox`.
+
+## Current window size
+
+`Window.Size()` returns the most recently observed client-area width and height in dp, or the requested initial dimensions before the first frame. It includes Keel-drawn menus and decorations, excludes the OS outer frame, and is safe to read from background goroutines.
+
+`Window.Resize(width, height)` requests positive client-area dimensions from UI callbacks or background tasks. Platforms may constrain the request; `Size()` and `Options.OnResize` report the actual result. Closed windows ignore requests. `OnResize` runs in the UI queue on the first frame and whenever dimensions change; `Size()` has already been updated when it runs.
+
+```go
+w := window.Open(window.Options{
+    Width: savedWidth, Height: savedHeight,
+    OnResize: func(width, height int) { rememberSize(width, height) },
+    Content: page,
+})
+width, height := w.Size()
+if err := w.Resize(960, 640); err != nil { panic(err) }
+```
+
+Applications choose where and when to persist dimensions. Layout should continue to use the current viewport rather than startup dimensions.
+
+## Minimum window size
+
+`Options.MinWidth` and `Options.MinHeight` set client-area minimum dimensions in dp; zero leaves that axis unconstrained. For example: `window.Options{Width: 1057, Height: 639, MinWidth: 800, MinHeight: 480}`.
+
+Keel forwards limits to the macOS, Windows and Linux X11/Wayland window drivers, including frameless windows. Initial dimensions (including restored sizes) and `Resize` requests below the minimum are clamped; off-screen automation applies the same limits. Linux window managers/compositors have the final say over size hints.
+
+## Resident applications
+
+`window.Main()` exits after the last window closes by default. Tray and other background applications can explicitly keep running. Resident mode drains `core.Update` with no windows, including updates while windows are minimized or occluded. The worker wakes on events and does not poll while idle.
+
+```go
+window.MainWithOptions(window.MainOptions{
+    KeepAlive: true,
+    OnQuit: func() { /* application cleanup */ },
+})
+```
+
+Call `window.Quit()` for explicit exit, from UI callbacks, background goroutines or with no windows. It runs remaining windows' `OnClose` callbacks followed by application `OnQuit`, once each under the frame lock, then exits the process. Main does not return and ordinary defers do not run. Callbacks must not wait for another `core.Update` or synchronously wait for the main thread. Closed windows remain closed: reopen with `window.Open` and keep business state outside the window. `OnClose` reports destruction and cannot intercept closure. See `examples/tray`.

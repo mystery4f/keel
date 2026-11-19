@@ -1,0 +1,862 @@
+# third_party
+
+English | [简体中文](README.zh-CN.md)
+
+Keel carries its own copies of the libraries it draws with, so it can fix
+and speed them up without waiting for upstream releases. They are ordinary
+packages of Keel's module, with no `go.mod` of their own, imported under
+Keel's path. Sources live in the root-level gio/ and typesetting/ directories;
+this directory keeps their attribution and patch logs:
+
+| Upstream import prefix | Keel's import prefix |
+| --- | --- |
+| `gioui.org` (Gio's root module) | `github.com/dyike/keel/gio` |
+| `github.com/go-text/typesetting` | `github.com/dyike/keel/typesetting` |
+
+| Directory (repository-relative) | Upstream | Base | License |
+| --- | --- | --- | --- |
+| `gio/` | [Gio](https://gioui.org) `gioui.org` | v0.10.3 | Unlicense OR MIT (`gio/LICENSE`) |
+| `typesetting/` | [go-text](https://github.com/go-text/typesetting) `github.com/go-text/typesetting` | v0.3.5 | Unlicense OR BSD-3-Clause (`typesetting/LICENSE`) |
+| `internal/gogio/` | Gio's packager `gioui.org/cmd/gogio` | v0.10.0 | Unlicense OR MIT (`internal/gogio/LICENSE`) |
+
+`gioui.org/shader` (including `gioui.org/shader/gio`) is a separate module
+and stays upstream.
+
+Both copies ship in Keel's module zip and share its version, so any app that
+requires `github.com/dyike/keel` builds with them; no `replace` is needed.
+Changing the import path changes Go type identity: an app or widget that
+imports upstream `gioui.org/...` or go-text types next to Keel must switch to
+the prefixes above (see [docs/single-module.md](../docs/single-module.md)).
+
+## Rules
+
+- Keep upstream style in these directories; change what Keel needs, nothing
+  cosmetic. Each change is listed below with the reason, so a rebase onto a
+  newer upstream can redo it.
+- The copies are foundations, not Keel modules: Gio may import itself and
+  typesetting, typesetting only itself, and neither imports other Keel
+  packages or upstream Gio/go-text (`internal/deps` checks this).
+- Upstream tests and test data are not copied. A patch comes with its own
+  test next to it; run them from the root (`go test ./gio/... ./typesetting/...`).
+- Updating to a newer upstream: copy the release without `go.mod`, `go.sum`,
+  `*_test.go` and `testdata`, rewrite the two import prefixes (leaving
+  `gioui.org/shader` alone), then reapply the patches below.
+
+## Patches
+
+- Android IME startup: retain explicit show requests until the activity is
+  resumed and its window has focus, then post the IMM call after focus dispatch.
+  Report window focus rather than treating `onResume` alone as focus. While a
+  show is pending, identify the surface as a text editor so Android's initial
+  focus policy does not hide the requested IME. Hide/unregister cancels pending
+  work; no polling or forced keyboard flag is used. Emulator regression:
+  `python3 scripts/check-android-ime.py --device emulator-5554` (API 30+, arm64,
+  soft keyboard enabled with a hardware keyboard). Use `--view-ref v0.4.10
+  --expect-blocked` to check the old startup failure. Physical devices and
+  pre-API-30 runtimes remain unverified.
+
+- Wayland purego: fractional-scale-v1 plus viewporter use the shared dispatcher
+  and native-owned protocol metadata, with integer fallback. Metrics, buffer
+  rounding, input/IME coordinates and scroll deltas use the render scale;
+  cursor hotspots retain the cursor buffer's own integer scale. Logical xdg
+  window geometry is explicitly committed; programmatic resizes refresh GPU
+  surfaces and coalesced frames retain pending refreshes, fixing stale buffers.
+  Explicit geometry fixes startup at minimum size on
+  Hyprland. Frameless windows no longer accumulate fallback titlebar height.
+  xdg-shell v4 bounds (or conservative output estimates) support initial size
+  selection. Tests cover metrics/rounding, decoration height and native resize,
+  scroll and reopening. Protocol definitions: wayland-protocols
+  staging/fractional-scale and stable/viewporter (MIT); no new cgo bindings.
+
+- Linux desktop bindings now default to purego, even with CGO enabled. No
+  build tag or native development headers are needed. `-tags giocgo` opts into
+  the old cgo bindings; `purego` or CGO_ENABLED=0 takes precedence. Android, BSD
+  and macOS selection is unchanged. A source-selection regression test covers
+  amd64/arm64 and the override combinations.
+
+- `gio/app`, Wayland: apply GNOME text-scaling-factor only to sp, not dp.
+  Output scale continues to control window geometry and backing buffers. This
+  prevents accessibility font scaling from enlarging titlebars, icons and
+  minimum window sizes; tests cover layout/text metric separation and invalid
+  settings.
+
+
+- `gio/text`: bound retained paragraph layouts by estimated bytes (8 MiB
+  ordinarily, at most 64 MiB for layouts used within eight explicit frames),
+  retaining the 1,000-entry cap. A short cached paragraph owns its string rather
+  than retaining the input document through a substring. `Shaper.BeginFrame`
+  protects visible working sets; callers without it keep the ordinary budget.
+  Tests cover byte/entry caps, oversized paragraphs, key ownership and working-set
+  reuse. This follows MyGo's byte-budget approach without changing layout output.
+- `gio/text`, macOS: retain stable face identities but reclaim least-recently-used
+  sized CoreText fonts above 512 unpinned objects. A copied descriptor must first
+  reconstruct a `CFEqual` font; unsupported identities remain pinned. Old glyph
+  IDs recreate their original fonts on demand. The existing `GlyphNativeFont`
+  API pins its returned handle to preserve its lifetime contract; the theme uses
+  `BorrowGlyphNativeFont` for synchronous rasterization. Descriptors, face-index
+  metadata, the existing 256-entry primary cache, and pinned fonts are outside
+  the 512-object budget, so this is not a bound on all native memory. Eviction,
+  legacy-handle and raster tests cover old glyphs, CJK, variable styles and emoji.
+
+- `gio/app`: keep the fallback title bar's Material widgets and text shaper
+  out of macOS and Windows window builds. AppKit and Win32 implement the
+  decoration option directly; the other platforms retain the existing
+  fallback, its measured height, actions and maximized state. Native and
+  fallback state tests and dependency checks cover the split.
+- `gio/gpu`: make `noopengl` exclude the OpenGL registration import and EGL/WebGL headless contexts. Previously
+  the tag removed window contexts but the GPU initializer still retained
+  the backend. A tagged test verifies that requesting OpenGL returns an
+  unsupported-backend error; other backends keep their existing behavior.
+
+- `gio/app`: reopen invalidation when a frame is delivered, so an external
+  update arriving during layout can request the following frame. Previously
+  the pending-request flag stayed closed until the event queue drained,
+  dropping that request. `TestInvalidateDuringFrame` reproduces the loss
+  and checks that duplicate requests still coalesce.
+
+- `gio/internal/ops`: op writes extend the data buffer in place when it
+  has room, instead of `append(o.data, make([]byte, n)...)`. The compiler
+  turns that idiom into an in-place extension only in ordinary builds;
+  under `-race` every write allocated the temporary slice, which pushed
+  the gallery's allocation ceilings over (label 40 per frame against 26)
+  and made `go test -race ./...` fail. Ordinary builds are unchanged: the
+  same allocations, and op writes and gallery frames within noise. A test
+  checks that a frame of op writes allocates nothing and returns zeroed
+  bytes; under `-race` it fails without the patch.
+
+- `gio/io/input`, `gio/app`: `Router.FocusSemantic(id)` gives keyboard
+  focus to a semantic node, through its focusable handler or the nearest
+  one inside it (a text field's editor), and `Window.QueueFocus(id)` does
+  so from any goroutine on the driver thread before the next event. An
+  accessibility client moves focus to an element it knows by its node.
+  `QueueInput` and `QueueFocus` wake the window from a goroutine: inside a
+  native callback on macOS's main thread, `Invalidate` would run Gio
+  inline. Tests focus nodes by ID, one through an inner area, reject an
+  unknown ID, and queue focus from another goroutine under the race
+  detector.
+
+- `gio/io/input`: `SemanticDesc.Focused` marks the node holding keyboard
+  focus, the innermost one whose area holds the focused handler's, so the
+  platform accessibility bridges report focus. And a handler's gestures
+  no longer unmake an area that describes itself: upstream set an area's
+  semantics to whether its handler takes clicks or scrolls, so a node with
+  a class and a label whose handler only takes key focus left the tree. A
+  test focuses two buttons in turn, one through a plain inner area, and
+  checks the mark; without either change it fails.
+
+- `gio/app`: `Window.ObserveSemantics(fn)` calls fn on the driver thread
+  after each frame is processed, with the frame's semantic tree and size,
+  while nothing else reads the window's input state; `Window.QueueInput`
+  takes input from any goroutine and delivers it on the driver thread
+  before the next event. On Windows, UI Automation calls providers on its
+  own threads while Gio's router belongs to the window thread; Keel's
+  bridge copies the elements from the observer and turns presses into
+  queued input (the Linux bridge queues its input the same way). A test
+  observes a frame, queues a click from another goroutine and checks the
+  handler receives it, under the race detector.
+
+- `gio/io/input`: semantic IDs stay with their nodes. A node with an input
+  handler keeps the ID its handler's tag had, through changes of label or
+  state (a checkbox toggles, "Save" becomes "Saved"). Other nodes are
+  matched by what they say (class, label, description, states) without
+  the handler, so a row Keel describes out of view without handlers keeps
+  its ID when it scrolls into view and gains them. Nodes that say the same
+  thing get distinct IDs in order, and no ID is given twice in a frame.
+  IDs are forgotten only after a frame that assigned them: upstream drops
+  them all when a frame passes without a call to `AppendSemantics`.
+  Screen readers keep their place through all of these. A test covers
+  each case and fails without the patch.
+
+- `gio/app`: `Window.AppendSemantics` returns the semantic tree of the
+  latest frame and `Window.ProcessInput` delivers an event as if the
+  platform had reported it, both on the driver thread. Keel's platform
+  accessibility bridge (`ui/window`) answers a screen reader's questions
+  from the tree inside the native callback and turns its press into a
+  click. A test finds a button in the tree and presses it.
+
+- `gio/io/input`: `Source.Pending` reports whether the router holds events
+  or commands for the next frame (input since the last frame, events the
+  last frame produced, queued commands). Keel's `ui/el` repaints a frame
+  from its retained tree only when none are pending. A test checks it
+  before input, while input waits and after a still frame delivered it.
+
+- `gio/internal/vk`: `vulkan_purego.go` (with `vulkan_x11_purego.go` and
+  `vulkan_wayland_purego.go`) implements vk's API without cgo on Linux:
+  libvulkan is loaded at run time and every function is called through
+  its pointer with integer, handle and pointer arguments. The Vulkan
+  structures and values are generated by `cgo -godefs` from
+  Vulkan-Headers v1.3.275 into `vulkan_types.go` and `vulkan_consts.go`
+  (identical for amd64 and arm64), with field names restored from the
+  headers (godefs drops the part before an underscore), so vulkan.go's
+  Go code is reused with its C types and helpers replaced; the 88 C
+  helpers become generated Go functions. `vulkan_layout_cgo.go` checks
+  every field offset and size and 157 values against the installed headers
+  in cgo builds. A headless test renders through the Vulkan fallback
+  context (lavapipe in CI) under either binding.
+
+- `gio/app` (Wayland): `os_wayland.go` keeps Gio's Wayland window logic
+  over opaque proxy pointers; its requests are marshalled in
+  `wayland_requests.go` with `wl_proxy_marshal_array_flags`, as
+  wayland-scanner's inline functions do with `wl_proxy_marshal_flags`, and
+  events arrive at shared `wlOn*` handlers. `os_wayland_cgo.go` keeps
+  Gio's listener tables (os_wayland.c) and generated protocol code, with
+  `//export` shims, and checks every opcode, protocol value and cursor
+  structure against the headers at init. `os_wayland_purego.go` loads
+  libwayland-client and libwayland-cursor without cgo, builds the
+  xdg-shell, xdg-decoration and text-input interfaces in C memory from
+  `wayland_protocols_purego.go` (generated from the scanner code), and
+  routes every proxy's events through one `wl_proxy_add_dispatcher`
+  callback. `egl_wayland_purego.go` loads libwayland-egl.
+
+- `gio/app` (X11): `os_x11.go` keeps Gio's X11 window logic over Go
+  definitions of the X structures it uses (Window, Atom and Time as uintptr,
+  C long as int); `os_x11_cgo.go` keeps Xlib through cgo and checks every
+  field offset, size and constant against the headers at init;
+  `os_x11_purego.go` loads libX11, libX11-xcb, libXcursor, libXfixes and
+  libxkbcommon-x11 without cgo. Wayland and Vulkan files are cgo-only on
+  Linux for now. Perform and Configure end with XFlush: they used to run
+  outside the event loop, which waits in poll, so Xlib kept their requests
+  (a close, raise or resize) buffered. Under Xvfb the resident and reopen
+  real-window tests timed out with both bindings and raise deadlocked at
+  times; the whole set now passes with both, on amd64 and arm64. Now that
+  `Run` queues them for the event loop (see below), the flush sends their
+  requests at once instead of at the loop's next XPending.
+
+- `gio/app/internal/xkb`: the key dispatch logic and keysym table move to
+  `xkb.go`, over libxkbcommon's opaque pointers; `xkb_cgo.go` keeps the cgo
+  calls (and checks the keysyms and enums against the headers) and
+  `xkb_purego_linux.go` loads `libxkbcommon.so.0` without cgo. A test
+  compiles the default keymap and checks the keysym, text, Shift and key
+  repeat of KEY_A under either binding.
+
+- `gio/internal/egl`: `egl_purego_linux.go` loads libEGL with purego on
+  Linux desktop when `CGO_ENABLED=0` or `-tags purego`, with uintptr
+  handles as `egl_windows.go` uses; `egl_unix.go` stays the cgo default and
+  the only binding on Android and the BSDs. EGLBoolean results are read
+  from their low 32 bits. `gio/gpu/headless` gains a pixel test that runs
+  on every platform (`GIO_HEADLESS_REQUIRED=1` fails instead of skipping
+  without a context), and `gio/gpu`'s `AddTinted` test moves to a
+  `!nometal` darwin file, so the package's tests build on Linux and with
+  `nometal`.
+
+- `gio/app` (macOS): a purego binding replaces `os_macos.m`, `os_darwin.m`,
+  the cgo helpers and the Metal and OpenGL window contexts when
+  `CGO_ENABLED=0` or `-tags purego`; the cgo files stay the default and iOS
+  is unchanged. `os_macos.go` keeps Gio's window logic over plain handles,
+  shared by both bindings; `displaylink_darwin.go` holds the display link
+  state machine. `os_macos_purego.go` registers `GioView`,
+  `GioWindowDelegate`, `GioAppDelegate` and `AppListener` with the same
+  names, methods and associated objects (Keel finds the input view by
+  `gioInputView` and the class name); a view reaches its window through a
+  map keyed by the view pointer. Super calls name the implementing class,
+  never the object's dynamic class. `NSTextInputClient` methods take and
+  return `NSRange`, `NSRect` and `NSPoint` as structs through purego
+  callbacks; float and struct messages use wrappers registered once
+  (`objc_msgSend_stret` on amd64). `runOnMain` posts tokens through one
+  `dispatch_async_f` callback and the display link uses one `CVDisplayLink`
+  callback. `os_macos_cgo.go` checks the AppKit values against the SDK. A
+  new test drives marked text, commit, cancel, surrogate-pair ranges, the
+  substring and the caret rectangle through `objc_msgSend` under either
+  binding; it fails without the protocol or with a skewed range. A nometal
+  test opens and resizes an OpenGL window.
+
+- `gio/gpu/headless`: `headless_purego_darwin.go` creates the Metal device
+  and command queue without cgo on macOS (`CGO_ENABLED=0` or
+  `-tags purego`), inside an autorelease pool on a locked thread, as the cgo
+  helpers do; iOS keeps `headless_darwin.go`. A test checks under each
+  binding that the queue belongs to the reported device; it fails when the
+  two are swapped. With the purego Metal backend, `CGO_ENABLED=0 go test
+  ./gio/gpu/...` passes on macOS.
+
+- `gio/gpu/internal/metal`: a purego binding, `metal_purego_darwin.go`,
+  sends the backend's Metal messages without cgo on macOS, selected by
+  `CGO_ENABLED=0` or `-tags purego`; `metal_cgo_darwin.go` keeps Gio's
+  Objective-C helpers as the cgo default and the only binding on iOS. The
+  backend's Go logic, now over plain handles, is shared by both. Encoder
+  calls reuse one argument array under a mutex, because `purego.SyscallN`
+  allocates its argument slice; calls that block or point at locals use
+  `SyscallN` directly. arm64 passes `MTLOrigin`, `MTLSize` and `MTLViewport`
+  by pointer to a copy; amd64 passes them on the stack through `RegisterFunc`.
+  Render pass descriptors are kept per clear color, since a frame alternates
+  between three and setting one is a reflective call. The cgo file checks
+  the enumeration values against the SDK. Tests cover `NSError` reporting
+  and compute dispatch under both bindings; the dispatch test fails when the
+  two sizes are swapped. The headless, paint and real-window tests pass with
+  either binding.
+
+- `gio/internal/cocoainit`: `cocoa_purego_darwin.go` starts the NSThread that
+  puts Cocoa in multithreaded mode without cgo (`CGO_ENABLED=0` or
+  `-tags purego`), releasing the reference from `new` as ARC does; iOS keeps
+  the cgo file. A test checks `+[NSThread isMultiThreaded]` with either
+  binding and fails when the thread is not started.
+
+- `gio/internal/gl`: a purego binding, `gl_purego_unix.go`, loads OpenGL on
+  macOS and OpenGL ES on Linux without cgo, selected by `CGO_ENABLED=0` or
+  `-tags purego`; `gl_unix.go` stays the cgo default and the only binding for
+  iOS, Android and the BSDs. It translates every method of the cgo binding,
+  including the two trampolines that adapt signatures
+  (`glGetVertexAttribPointerv` returns its out-parameter, an absent
+  `glInvalidateFramebuffer` is skipped) and upstream's `Flush` calling
+  `glFinish`. Integer and pointer calls go by address through a
+  `go:uintptrescapes` helper; the six float calls use `RegisterFunc`.
+  `GLint`, `GLuint` and `GLboolean` results are narrowed before widening, so
+  `-1` uniform locations survive. Tests load every symbol and check the C
+  string helpers; the headless tests pass with `-tags "nometal purego"` on
+  macOS, rendering through the binding.
+
+- `gio/gpu/internal/metal`: immutable vertex buffers on unified-memory Macs
+  and iOS devices now use the existing bounded, power-of-two Metal buffer pool.
+  Large paths previously bypassed that pool and called `newBuffer` for every
+  cache miss, including every frame of a rotated spinner. Shared and private
+  storage have distinct pool keys; released storage becomes reusable only after
+  `BeginFrame` has waited for the preceding command buffer, and `Trim` still
+  releases it. The renderer keeps dedicated per-path buffers and unchanged
+  vertex coordinates, coverage, clipping and opacity. Re-keying solely by local
+  path geometry is intentionally avoided because tessellation, x-monotone curve
+  splitting, bounds and contour `MaxY` are computed after the non-translation
+  transform. Native tests check completion-gated shared-buffer reuse and compare
+  24 rotating-path frames byte-for-byte with a renderer whose pool and path
+  cache are dropped before every frame; a full-frame benchmark covers sustained
+  rotation.
+- `gio/op/paint`, `gio/gpu`, `gio/internal/ops`: `ImageOp.PaintQuads` (and
+  `PaintTintedQuads` on Metal builds) paints one image at many offsets, each
+  clipped to a rectangle of the image, as a single `TypeImageQuads` operation
+  whose quads follow in an Aux operation. It replaces an offset, a rectangle
+  clip, a brush and a paint per quad: seven operations that both the input
+  router and the GPU collector decoded every frame. Keel's CoreText glyph
+  atlas draws each run of masks on one page this way; text was about three
+  quarters of a typical frame's operations. Under an integer translation the
+  collector turns each quad into an image operation directly, computing the
+  same bounds, clip intersection, material and rectangle-clip parentage as the
+  separate operations. Other transforms (fractional offsets, scale, rotation)
+  replay the separate operations, keying their transformed clip paths by
+  content because all quads share one operation key. Uniform and empty images
+  always use the separate operations, and the image stays the current brush
+  afterwards. A headless test compares the pixels byte for byte against the
+  separate operations under offsets, fractional offsets, scale, rotation,
+  rectangle and rounded clips, nested opacity and a later paint; a benchmark
+  drawing 3,200 glyph quads took 0.52 instead of 0.99 ms a frame on an Apple
+  M4.
+
+- `gio/app`: macOS driver actions retain window identity while the input view
+  is temporarily detached for a material wrapper. The non-owning host link is
+  cleared when the window closes. Responder reparenting no longer reports a
+  false window blur, and assigning a responder to an inactive window does not
+  claim keyboard focus. Raise explicitly activates NSApplication instead of
+  consulting the potentially stale NSRunningApplication snapshot. Void's native
+  regression exercises typing, Cmd+, and repeated inactive-app reopening.
+  The shared event loop also rejects event delivery after DestroyEvent: a
+  late native wakeup must not block the main thread on an exited consumer.
+  A channel-based regression covers that terminal transition.
+
+- `gio/app`: native window delegates keep the original Gio input view in a
+  retained Objective-C association instead of assuming it is `contentView`.
+  AppKit glass can now occupy the window root while Gio draws transparent
+  content inside it. The wrapped-view native regression covers focus, resize
+  and close; `ui/window/testdata/glass` checks the material root, hit testing,
+  minimize/restore and teardown for all three glass styles.
+
+- `gio/app`: macOS startup honors the bundle's `LSUIElement` flag instead of
+  always switching to a regular Dock application. Accessory launchers can open
+  their first window without a later policy change deactivating it. A native
+  bundle regression checks regular and accessory launch policies.
+
+- `gio/text`, `gio/font/opentype`, `ui/theme`: macOS platform shapers use
+  CoreText for matching, fallback and shaping. The raster hook borrows the exact
+  shaped CTFont instead of reopening it from a path. Font preparation validates
+  required tables and reads metadata without retaining Go glyph/AAT tables;
+  the Go fallback parses lazily. Immutable native source descriptors are shared
+  across shapers through a bounded weak cache; style/size identities and scratch
+  remain separate. Opaque faces and custom variation coordinates retain the Go
+  engine. `NoSystemFonts` still disables native system fallback. Initialization
+  drops collection wrappers so old file-backed callers do not retain unused Go
+  fonts. `typesetting/font.Validate` shares NewFont's required-table validation.
+- `gio/op/paint`, `gio/gpu`, Metal, `ui/theme`: ordinary glyph pages retain one
+  linear coverage byte per pixel. Unified-memory Metal uses swizzled R8 textures
+  and single-channel mipmaps; unsupported devices, allocation failures, tint and
+  opacity fallbacks preserve the former sRGB RGBA representation. Immutable
+  copy-on-write pages remain necessary for queued/multiwindow GPU reads. Active CPU
+  atlas capacity is 8 MiB (formerly 32 MiB); color images and non-atlas
+  markers now have a separate 2 MiB/512-entry LRU. Weak shaper keys allow closed
+  windows' font resources to be collected. Tests cover source ownership,
+  legacy/opaque/memory fonts, exact face identities, multilingual clusters,
+  wrapping/truncation, Go fallback, cache bounds/lifetimes, native upload ordering,
+  and tinted/clipped/scaled/opacity pixels. `testdata/textcache` exercises two real
+  windows through 12 glyph/style/size/clip/opacity updates and resizes.
+  Targeted measurements: `BenchmarkSystemFontShaping` measures Go allocation,
+  not process footprint; a 256px Metal page with all mips allocates 98,304 bytes
+  as R8 versus 360,448 as RGBA on the inspected Apple M5 Pro.
+  These changes are included in Keel v0.3.2.
+
+- `typesetting/shaping`: a platform visual-order callback runs before whitespace
+  trimming and again after inserting a truncator, including fitting/wrapped
+  paths. CoreText's nested bidi order is preserved rather than recomputed from
+  direction flags alone. Independent CTLine glyph/font/position comparisons
+  cover LTR/RTL mixed Arabic, Hebrew, numbers, CJK, combining text and emoji;
+  the adapter agrees within 1/64 pixel after accounting for Gio alignment.
+
+- `gio/gpu`: bound sparse coverage-page growth. Wide corner bands and tall
+  border strips no longer expand one mostly empty atlas; growth exceeding
+  256 Ki pixels and leaving a page less than one-quarter occupied starts a
+  new page. Small/dense masks retain the existing packing. Paths, clipping,
+  paint order, resolution and drawable synchronization are unchanged. Tests
+  cover sparse/dense packing, bounds, non-overlap and reset. Native Rex
+  allocation tracing at 4000×2200 observed R16 coverage storage changing
+  from 20.55 to 2.77 MiB. This is a local allocation result, not a repeated
+  total-footprint or frame-rate result.
+
+- `typesetting/fontscan`: intern identical rune coverage while decoding each
+  disk index, before allocating another coverage slice. A read-local hash table
+  selects candidates; full page/bitmap comparisons guard collisions. Entries
+  own decoded storage, never the reused input record. Cache version 7, named
+  instances and other face metadata remain independent. Tests cover record
+  ownership, collisions, truncation, decode isolation and allocation-free hits.
+- `gio/widget`, `gio/widget/material`: carry the solid label color by value
+  plus presence internally, with an additive `Label.LayoutWithColor` method.
+  Existing structs and pointer-color methods remain available. Selectable
+  material labels keep their color in the selection state, not a temporary
+  LabelStyle. Tests cover transparent colors, legacy pointers, selection and
+  cross-layout ownership; ordinary warmed material labels allocate nothing.
+- `gio/gpu`: admit path-space stroke geometry only after observing its key in
+  consecutive frames. A fixed-size hash-only candidate table avoids copying
+  one-frame resize paths; collisions may prevent admission but cannot return
+  wrong geometry. Admitted entries still own their path and quads and retain
+  the existing exact-byte check, expiry and 1 MiB/128-entry limits. Tests cover
+  stable admission, changing-path allocations, skipped frames and affine pixels.
+
+- `gio/gpu`, `gio/internal/stroke`: cache stroke outlines in path coordinates,
+  before the existing affine transform and vertex splitting. Rotation no longer
+  rebuilds the same outline; width/content changes remain distinct. Exact input
+  comparison prevents hash-collision reuse. Owned entries expire after an unused
+  frame and are bounded to 128 entries/1 MiB; oversized paths bypass caching.
+  Renderer trim/release drops the cache. Reusable, independently owned stroking
+  scratch also reduces changing-path misses and discards oversized arrays.
+  Tests compare the old algorithm's curves and affine vertices byte-for-byte,
+  check ownership/eviction/allocation bounds, and compare warmed/fresh GPU pixels
+  under rotation, nested rounded clipping and opacity. No shader or GC changes.
+- `typesetting/font`: validate TrueType contours and collect variation point
+  counts without first allocating every outline and discarding it. Full
+  contours remain lazily decoded under the existing shared cache lock. Tests
+  compare headers, counts, outlines and metrics with the eager parser;
+  fuzzing checks malformed records against that parser.
+- `typesetting/fontscan`: skip disk-index rewrites when file paths and
+  modification times are unchanged. Stream changed indexes one file at a
+  time, and reuse exact-length read storage instead of growing a bytes.Buffer
+  at record EOF. The version-7 format, font identities and fallback validation
+  remain unchanged. Tests cover cache invalidation, format compatibility,
+  storage reuse and truncated records. No GC policy changes.
+
+- `gio/widget.Icon`: retain an LRU of up to eight immutable size/color images,
+  with a 1 MiB pixel budget per icon. A larger image retains only itself, as
+  before. Alternating variants no longer rerasterize or change texture identity;
+  tests cover warm zero-allocation hits, eviction and reference release.
+- `gio/text`, `gio/widget`: labels and editor painting borrow one 32-glyph
+  scratch buffer from their shaper. CoreText opts into a synchronous, read-only
+  raster-hook contract; existing `SetRasterHook` callers keep independent
+  buffers. Overlapping borrows and hook changes cannot reuse a live lease.
+  Tests cover legacy retained slices, lease invalidation and allocation-free reuse.
+- `typesetting/fontscan` tests isolate the variable PingFang UI collection
+  when checking named instances and immutable-table sharing. Installed static
+  MobileAsset faces can legitimately win system fallback. CoreText tests cover
+  both the explicit variable fixture and actual installed weight resolution,
+  retaining exact PostScript-identity and nonblank-glyph assertions.
+
+- Share identical stencil masks within each frame without adding GPU textures. Preserve absolute transform inputs and parent intersection behavior; tested with native pixel comparisons. See [rendering memory](../docs/rendering-memory.md).
+
+- `gio/gpu/internal/metal`: unified-memory devices initialize immutable geometry and
+  the first complete sampled-image upload directly in shared resources. This avoids
+  activating GPU copy work for ordinary UI uploads, which added about 57 MiB in a
+  minimal local Metal experiment. CPU-generated mip levels retain linear-light sRGB
+  filtering; native comparisons cover odd sizes, strides and all levels (maximum
+  observed channel difference 2/255). Partial/repeated uploads, mutable buffers,
+  render targets, non-unified devices and allocation failures retain the ordered
+  GPU path. No per-frame GC, frame-rate cap or drawable-count change. See
+  [rendering memory and reuse](../docs/rendering-memory.md) for scope and limitations.
+
+For a behavior-by-behavior summary with source/test links, see
+[Changes from upstream](../docs/upstream-patches.md). Numbers below are historical
+local measurements, not fresh benchmarks or portable application guarantees.
+
+- Root-level relocation: the foundation trees now live in gio/ and typesetting/
+  with matching import prefixes. Link symbols, resource discovery, CI and release
+  fixtures follow those paths; source checks reject obsolete foundation imports.
+- Module merge: the copies' `go.mod`/`go.sum` were removed and their imports
+  rewritten to Keel's prefixes, so they no longer depend on application-level
+  `replace` lines (which Go does not propagate) to reach apps.
+- `internal/gogio`: the packager runs inside `keel` instead of `go run
+  gioui.org/cmd/gogio`, because upstream gogio hard-codes Gio's import path. It
+  takes that path from `GioRoot` (for `app.ID`, the log app ID, extra args,
+  permissions and the `app/` package lookup); flags, working directory,
+  environment and output are per-run options (`Run`) rather than process
+  globals; upstream package-level state is serialized. Default outputs resolve
+  against the supplied working directory. A WebAssembly packaging regression
+  checks app ID/launch-argument linking, HTML title and output files; the release
+  fixture builds a custom widget from the real root archive. The Windows target
+  and upstream end-to-end tests are not copied: Keel writes
+  its own Windows resources. `cmd/gogio` runs it directly for
+  builds without `keel.json`, such as the site's gallery.
+
+- Packager relocation: the standalone entrypoint lives at `cmd/gogio` and the
+  shared implementation at `internal/gogio`, so both commands can use it without
+  nesting a command inside `cmd/keel`. Resource-discovery tests use the new
+  directory depth; CI and release fixtures invoke the standalone command.
+
+- `gio/internal/nativeabi`: no-cgo macOS ABI probes call Go Objective-C IMPs
+  through the real system `objc_msgSend`. They cover range pairs/register
+  exhaustion, nested rect arguments/returns, floating point arguments, nullable
+  native-allocated out buffers and canaries. Classes/callbacks register once.
+  Scalar floating callback results are explicitly documented as unsupported by
+  purego 0.11.1. This is an M0 feasibility test, not a migrated window backend;
+  Expanded probes cover aggregate super calls and native invocation of copied
+  blocks. Native arm64 tests pass; amd64 execution and exact protocol signatures
+  remain required.
+
+- `gio/widget.Editor`: exposes optional `ScrollBounds`, `ScrollOffset` and `ScrollTo` methods for multiline scrollbar drawing and dragging. Moving the viewport preserves the selection; the next edit or caret movement resumes caret scrolling. Capability detection retains native wheel scrolling when the extension is absent; import-path compatibility still follows the migration guide. A 1×/2× regression checks clamping, selection, caret reveal and content replacement.
+
+- `gio/gpu/internal/metal`: idle trimming waits for the last submitted GPU work, then releases its command buffer, staging buffer and quad instance buffer. Live textures and pipelines remain cached; temporary buffers are recreated on the next draw or readback. This lowers retained idle memory without requesting frames. A headless regression test checks repeated trim, readback and resumed rendering.
+
+- `go vet` fixes for unkeyed struct literals in `gio/internal/f32` and
+  `gio/app/internal/ibus`.
+- `typesetting/font/opentype`: resources that expose their bytes (`Shared`,
+  or any with a `Bytes() []byte` method) hand out table slices instead of
+  copies and never write into a
+  caller's buffer.
+  `typesetting/fontscan` maps system font files read-only (`mmap`,
+  `MapViewOfFile`) and parses them as `Shared`, so a face's tables are clean
+  file-backed pages, not Go heap: hello's idle footprint went from 153 to
+  103 MB on macOS. `gio/font/opentype.ParseCollectionShared` does the same
+  for bytes that never change, used by `gio/font/gofont`; Keel's theme
+  passes its font files with a `Bytes` method.
+  Tested by parsing, describing, shaping and outlining every system font
+  from read-only mappings (`fontscan/openfont_test.go`).
+- `typesetting/harfbuzz`: an attachment chain pointing before the buffer
+  returns as in HarfBuzz instead of indexing `pos[-1]`, which panicked
+  shaping macOS's Farisi.ttf.
+- `gio/gpu`: the path renderer's coverage textures (stencil and
+  intersection FBOs, often larger than the window since they pack every
+  rounded shape) are redrawn every frame, so after a committed frame they
+  are marked volatile (`driver.Volatile`, Metal's purgeable state) and made
+  non-volatile again when a frame resizes them for use. An idle window's
+  largest GPU allocations leave its footprint: hello 72 -> 64 MB on macOS.
+  Other backends do not implement it yet.
+  Since an animating window would pay a kernel call per frame for it, the
+  marking happens only when a frame asks for no frame within 100 ms
+  (`app.Window` calls `gpu.Idle`, using `input.Router.PeekWakeup`, which
+  does not consume the wakeup). Each texture remembers its state, so
+  nothing is called while it is unchanged.
+- `gio/gpu/internal/metal`: GPU buffers are pooled by power-of-two size
+  class instead of created and released every frame (`newBuffer` and
+  `CFRelease` took a fifth of an animating window's CPU). A buffer released
+  during a frame is reused only after the next `BeginFrame`, which waits
+  for the previous command buffer; the pool is bounded (32 MB, 64 per
+  class) and emptied by `gpu.Idle`.
+- `gio/gpu`: clip paths are cached by content (a hash of the path data,
+  with stroke width, outline and transform) instead of by the ops that
+  recorded them, whose key changes whenever the `Ops` are reset. Keel
+  records each frame anew, so every border and rounded shape was
+  re-tessellated and re-uploaded every frame. The offset is not part of the
+  key, so moved content reuses its paths too. An animating gallery
+  allocated 881 -> 470 MB per 10 s (51 -> 29 GCs). All static component
+  screenshots are byte-identical.
+- `gio/app` (macOS, iOS): `displayLink.Start` and `Stop` only send to the
+  display link's goroutine when the requested state changes. Windows call
+  `Start` on every animated frame, and the unbuffered send blocked the main
+  thread on a goroutine handoff each time.
+- `gio/app` (macOS): keep three `CAMetalLayer` drawables during rendering.
+  Core Animation can retain two presented surfaces during resize; limiting
+  the pool to two intermittently blocked the main thread in `nextDrawable`
+  for about a second. Idle trimming still shrinks spare surfaces. The native
+  `TestMetalResizeWindow` regression drives 60 growing/shrinking frames and
+  rejects the compositor stall (`KEEL_DESKTOP=1 go test ./gio/app`). The
+  native Metal tests keep their windows on top and skip, rather than hang,
+  when the window is occluded anyway (covered, display asleep or locked),
+  since an occluded window draws nothing.
+- `gio/gpu`, `gio/gpu/internal/metal`: consecutive ops clipped to a plain
+  rectangle and filled with a solid color or a texture are drawn as one
+  instanced draw (`driver.QuadBatcher`, up to 8 textures a batch) instead of
+  a draw call each: a terminal-sized text grid issued 3,300 draws a frame.
+  The Metal shader is compiled at run time and computes what Gio's blit
+  shaders compute; other backends keep the per-op path. Every static
+  component screenshot is byte-identical.
+- `typesetting/harfbuzz`: AAT shaping (`morx`, `kerx`, used by Apple fonts
+  such as Menlo) keeps each subtable's glyph class cache on the font's
+  accelerator, as HarfBuzz does; upstream copied it into a per-call context
+  and threw the filled copy away. The context and the subtable drivers'
+  state live in the reused `Buffer` instead of 1.3 KB and more allocated per
+  run. Shaping output is identical for 239 macOS faces with `morx`; text
+  allocation in the benchmark grid scene halved.
+- `typesetting/fontscan`: `FontMap.ResolveFace` resolves ASCII runes from a
+  per-query table and hashes the query's families once per `SetQuery`
+  instead of once per rune. `SetQuery` and `SetScript` keep the caches when
+  the query or script is unchanged; Gio calls both for every run of text it
+  shapes. A test checks that cached and fresh maps resolve the same faces.
+- `gio/app` (macOS): a window nobody can see (covered, on another space, or
+  with the screen locked or asleep) draws nothing after its first frame and
+  stops its display link; it redraws when it shows again
+  (`windowDidChangeOcclusionState:`). AppKit reports changes only, so the
+  state is also read when the view attaches. Gio drew every animation frame
+  of hidden windows: the benchmark grid scene used 0.49 s of CPU per second
+  with the screen locked, now 0.001 s.
+- `gio/app` (macOS): with every display asleep, creating the display link
+  failed and window creation then panicked in `gio_onDestroy` (a view
+  without a handle). The display link falls back to the main display, and a
+  view without a handle skips `gio_onDestroy`.
+
+- `gio/op/paint`, `gio/gpu`, `gio/gpu/internal/metal`: the optional Metal-build
+  `ImageOp.AddTinted` extension multiplies an immutable image by a per-draw
+  linear color. Keel's glyph atlas stores white coverage once instead of
+  duplicating it for every text color (the benchmark grid uses one 1 MiB page
+  instead of six). Metal reserves the frame's quad storage before texture
+  upload, so shared tinted textures cannot enter the untinted fallback during
+  a render pass. Path clips, opacity layers and unavailable batching bake the
+  tint into separately cached textures. Builds without the extension retain
+  Keel's colored atlas pages through interface detection. Tests cover texture
+  sharing, cache eviction, fallback colors, transparency, transforms, clipping
+  and opacity; 8-bit coverage quantization can change edge pixels slightly.
+  On an Apple M4, three alternating runs reduced median process footprint
+  from 205 to 145 MB for the grid and 191 to 148 MB for widgets. A 240-frame
+  offscreen grid test reduced median time from 2.776 to 2.452 ms/frame and
+  allocation from 1.18 to 1.04 MB/frame. These are local measurements with
+  both atlases enabled, not memory limits or promises for other applications.
+
+- `gio/app` (macOS): after one second without drawing, a cancellable one-shot
+  callback trims GPU textures, paths and scratch buffers, then shrinks the
+  Metal drawable pool to 1×1. Core Animation retains the displayed frame;
+  the next render restores the drawable size. Compiled pipelines stay alive.
+  Native tests cover repeated idle/resume and closure with a pending callback.
+  Native idle helpers use purego v0.11.1; the combined module's Go version
+  is specified by the root go.mod.
+- `gio/gpu`: color/texture/gradient fallback pipelines and the stencil renderer
+  initialize on first use, avoiding unused shader resources in quad-only scenes.
+  Headless pixel tests exercise rendering and readback before and after trimming.
+- `gio/io/input`: discard adjacent drawing-only leaf clips when collecting input.
+  Handler, cursor, semantic and window-action clips remain. Randomized tests
+  compare hit testing against the original collector.
+- `typesetting/font`: allocate glyph-extents cache pages only for measured
+  glyphs. CFF fonts retain validated charstring INDEX offsets instead of a Go
+  slice header per glyph; the public expanded CFF parser remains available.
+  Tests cover cache boundaries, malformed INDEX data and equivalent outlines.
+- `typesetting/fontscan`: share equal immutable system-font coverage sets,
+  checking full contents after hashing; retain ownership of query family slices
+  so caller reuse cannot corrupt resolution caches.
+- `gio/text`, `typesetting/shaping`, `typesetting/harfbuzz`: cache parsed
+  typefaces, bypass unnecessary wrapping and segmentation for eligible text,
+  reuse normalization scratch and avoid copying shaping-plan keys.
+  Fast paths preserve mandatory Unicode breaks and have regression tests.
+- `typesetting/fontscan` (macOS): also scan `/System/Library/AssetsV2/com_apple_MobileAsset_Font*`, where current macOS keeps system fonts such as PingFang. Without it, "PingFang SC" never resolved and Chinese fell back to Hiragino Sans GB W3, with no Medium or Semibold. `fontscan/scan_darwin_test.go` resolves all three weights.
+- `gio/text`, `gio/font`, `gio/widget`, `gio/widget/material`: platform glyph rasterizers. `Shaper.GlyphFile(id)` reports a glyph's font file, face index, size and glyph id (faces from `font.FaceSource` keep their path; built-in, variable-instance and varied faces report false). `Shaper.SetRasterHook` registers a function that draws a solid-color line of glyphs; `Label`, `Editor` and `Selectable` take an optional `Color` (set by `material.LabelStyle` and `EditorStyle`) and, with a hook, translate each line by whole pixels and pass the fraction to it, falling back to outlines when it reports false. Keel's theme sets the hook on macOS to draw with CoreText and detects optional hooks through interface assertions. This does not allow mixing upstream and Keel import paths.
+- `gio/gpu`: an opaque full-window clear discards completed opacity layers together with their covered paint operations. Stale layer indexes otherwise replace unrelated foreground operations, causing missing glyphs in fullscreen overlays. Regression tests cover discarded layers, subsequent layers, partial covers and fills inside active opacity groups.
+
+## Wayland teardown acknowledgment
+
+The Wayland backend defers surface/display destruction until the next `Event`
+call after returning the invalid `WaylandViewEvent`. Queuing that event is not
+an acknowledgment: Keel must first release its scroll-watch pointer, seat and
+private queue while the display is still alive. Previously `close` disconnected
+immediately, causing a use-after-free in `wlScrollWatch.close` on Linux.
+`deferred_teardown_test.go` covers notification, acknowledgment and single cleanup.
+
+- `gio/app` (Wayland): queue `Run` callbacks for the native event thread instead of executing them on a background caller. Asynchronous maximize/configure otherwise races frame collection and can reset recorded operations while the GPU reads them. Shutdown stops queue wakeups before closing the native pipe and releases waiting `Window.Run` callers. A regression decodes a frame before draining a queued reset.
+
+- `gio/app` (X11): queue `Run` callbacks for the event loop, as on Wayland. Gio ran them on the caller's goroutine, so Perform and Configure called Xlib there while the loop waited in poll on the X connection. During such a call Xlib can read events off the socket into its own queue; when that happened after the loop's last XPending, poll never woke and the window ignored its close request. The reopen real-window cases timed out ("FAIL: timeout") in 5 of 3,840 runs under Xvfb without cgo; a dump at the timeout showed the loop in poll, the socket and notify pipe empty, and one event in Xlib's queue. Before the loop starts, `Run` still calls f directly, because `Window.init` replays early actions from inside `Event`. Shutdown stops queue wake-ups before closing the notify pipe and releases waiting `Window.Run` callers. `os_x11_run_test.go` covers the queue, the wake-up and shutdown.
+
+- `gio/gpu`: track opacity membership per image operation. An unrelated opacity layer no longer disables shared tinted textures for the whole frame; path clips and images inside layers retain baked colors. Texture-count and native pixel tests cover unrelated and nested opacity. CoreText uses 256×256 pages with the same 32 MiB pixel budget to reduce whole-page color copies in the fallback path; cache tests cover eviction and pages used in the current frame.
+
+- `typesetting/fontscan` (macOS): scan the system FontServices `Resources/Reserved` directory. Current macOS stores PingFangUI.ttc there; omitting it silently falls back to another CJK family. A native font-resolution test covers Helvetica Neue and PingFang SC.
+
+- `ui/theme` native glyph rendering: resolve the selected TTC face by its PostScript identity through purego. CoreText descriptor indexes differ from TTC face indexes after named-instance expansion. Native tests inspect the created PingFang SC Medium and SF Regular objects; this prevents the former from being drawn as HK Thin. No new cgo bindings.
+
+- `typesetting/font/opentype/tables`: fix `fvar` named-instance record strides and bound each record so an absent PostScript name cannot consume the next record. `fontscan` indexes named weights with default non-weight axes, loads their coordinates, and bumps the disk cache to version 7. `gio/text.Shaper.GlyphFileInstance` exposes the selected instance to CoreText; native tests verify Regular and Semibold identities from shaping through rasterization.
+
+### 2026-10-14: retained framebuffer and variable-font tables
+
+- `gio/gpu/path.go`: calculate framebuffer waste as retained area / requested
+  area. The inverse ratio never shrank an oversized framebuffer after a smaller
+  frame. `TestFramebuffersReleaseOversizedStorage` covers shrinking, stable reuse
+  and release.
+- `typesetting/fontscan`: named instances of the same file and TTC index share
+  immutable parsed font tables. Each instance retains a distinct `Font` identity
+  and `Face`, preserving location metadata and independent variation coordinates.
+  The Darwin PingFang instance test checks shared GSUB storage and distinct weights.
+- `typesetting/font`: retain glyph headers and variation point counts at load
+  time, then cache full TrueType contours only when an outline is requested.
+  This avoids retaining every CJK contour merely for native text rendering.
+  Shared caches are synchronized; the public Face scratch state remains separate.
+  Tests compare every Go Regular outline and representative PingFang glyphs at
+  four weights against eager decoding, including concurrent cache access.
+
+### 2026-10-14: covered quad batching and conservative clip interiors
+
+- Metal batches path/intersection-covered color and image quads with coverage
+  textures in the existing eight-slot table. Coverage uses the original
+  `min(abs(value), 1)` operation. Clipped tinted glyphs can share atlas textures;
+  opacity layers and unsupported devices keep their existing fallback. Tests
+  cover texture-slot exhaustion, ordering, tint, allocation fallback, and native
+  pixels for rounded/nested clips.
+- Rounded rectangle path operations carry a conservative interior rectangle.
+  A paint can skip coverage only when every path ancestor contains its complete
+  pixel bounds; an extra pixel margin protects antialiased edges. Unknown paths,
+  strokes, rotations and unsupported transformed rectangles retain coverage.
+  Collection tests cover these cases. The internal clip operation encoding grew
+  by 16 bytes; all readers use the updated length.
+- OneCatch's 5016×2820 comparison differed by at most 1/255 per channel. Actual
+  window loading/scrolling still exceeds 300 MiB; neither pixel tests nor lower
+  frame submission time establishes that memory target or end-to-end frame rate.
+
+- `typesetting/shaping`: trailing whitespace trimming now verifies the source cluster contains only Unicode whitespace. Missing outline metrics (including the installed PingFang UI face) also yield zero ink width and must not erase the final visible glyph advance. Both the fitting multi-run path and wrapped-line path use the check. Synthetic LTR/RTL/vertical tests and mixed-font label width/pixel regressions cover it.
+- `typesetting/shaping`: line breaking measures candidate lines with the same check. `Output.advanceSpaceAware` left a zero-ink final glyph out of the width as if it were a space, so with PingFang (no outline metrics) every wrapped CJK line held one glyph more than its width and the last glyph was clipped. It now drops the glyph only when its source text is whitespace (`whitespaceCluster`, shared with trimming). Synthetic tests cover the wrapped line count and the width check.
+
+### 2026-10-14: presentation device-loss recovery
+
+- `gio/app`: port upstream Gio commit [bf9f995](https://github.com/gioui/gio/commit/bf9f995d86c22d555d7ce2db154395bca94541b7). When `Present` reports `gpu.ErrDeviceLost` (including wrapped errors), release the GPU context and schedule an immediate new frame. The acknowledged frame cannot be retried. Keel only runs idle GPU reclamation after successful presentation, while the context remains locked.
+- Regression tests cover success, direct/wrapped device loss, unrelated errors, acknowledgment count, and context lock/release ordering. The Windows cross-build passes; Windows client behavior has not been verified on hardware. Metal currently returns no presentation error, so this patch does not reduce macOS memory peaks.
+
+### 2026-10-17: mutable images and linear filtering without mipmaps
+
+- `gio/op/paint`, `gio/gpu`, new `gio/internal/dirty`: `NewMutableImageOp`
+  returns an ImageOp whose pixels the caller may change during layout, then
+  report with `Invalidate(rect)`. The op's handle is a `dirty.Tracker` keeping
+  the last 32 changed rectangles. `texHandle` uploads the union of changes
+  since the version a texture holds into that texture (`updateTexture`), or
+  the whole image when the texture is further behind. Tinted textures re-tint
+  only the changed area. Every driver already accepted offset uploads and
+  regenerates mipmaps after an upload.
+- `paint.FilterLinearNoMipmap` (filter byte 2) creates textures with linear
+  min/mag filtering and no mip chain. Every driver supported that combination;
+  the Metal CPU mipmap path (`uploadMipmaps`) allocated each level in Go on
+  every upload of a linearly filtered image.
+- Reason: a remote desktop viewer (Mirage) re-created whole tile textures for
+  each update and kept several CPU copies alive until Gio finished with them.
+  Tests cover partial uploads of a sub-image source, unions of changes in one
+  frame, clipping, catch-up after the log, tint, filter mapping, the op
+  encoding and texture release. With a 2880×1800 remote screen redrawn 30
+  times a second in a real macOS window (scale 0.44, so still mipmapped),
+  Mirage's footprint went from ~450 MB to ~324 MB and its live Go heap from
+  104 MB to 43 MB; GCs fell from 67 to 11 per minute. Only Metal has been
+  exercised in a real window; OpenGL, Direct3D 11 and Vulkan run the same
+  offset uploads but were not tested with mutable images.
+
+### 2026-10-18: surface images (IOSurface textures)
+
+- `gio/op/paint`, `gio/gpu`, `gio/gpu/internal/driver`, `gio/gpu/internal/metal`,
+  new `gio/internal/surface`: `paint.NewSurfaceOp(s)` shows the current
+  picture of a `paint.Surface`, a platform surface its owner replaces with
+  `Set(ref, size)`. `texHandle` hands it to `surfaceTexture`, which asks the
+  device (`driver.SurfaceTextureDevice`) for a texture over the surface only
+  when the picture changed, without mipmaps, and releases the previous one.
+  Devices without the interface draw a transparent pixel. Metal implements it
+  with `newTextureWithDescriptor:iosurface:plane:` in BGRA8Unorm_sRGB through
+  purego (`surface_darwin.go`), so no C was added.
+- Reason: Mirage decodes macOS's HEVC screen stream with VideoToolbox, whose
+  output is an IOSurface. Each 4K frame was swizzled to RGBA, copied into tile
+  images and uploaded: about 100 MB of memory traffic per frame at 40 frames a
+  second. A surface texture shares the decoder's memory instead. Tests cover
+  wrapping once per picture, release of the previous texture, the fallback,
+  texels read back from a real IOSurface texture, and a headless Metal window
+  drawing a surface byte for byte like the same pixels in an ImageOp at three
+  scales.
+- `gio/app` (macOS, iOS): idle GPU reclamation is debounced. A window
+  redrawn by frequent external updates (a remote screen at 60 updates a
+  second through `Invalidate`) asks for no next frame after each of them, so
+  every frame marked its coverage textures volatile, waited for the GPU and
+  freed the staging, pooled and quad buffers, and the next frame reversed it
+  all (`textureSetVolatile` alone was about 12% of Mirage's CPU samples). Now
+  the Metal context's timer (`idleDebounce`) calls `gpu.Idle` once the
+  window has presented nothing for 250 ms and, on macOS, `gpu.Trim` plus the
+  drawable shrink after 1 s, as before. The timer is set once and moved only
+  when an idle frame needs it earlier, not stopped and recreated per frame.
+  Other contexts keep calling `gpu.Idle` directly. Pure-Go tests drive
+  60 Hz, slow and animated frame sequences through the debounce;
+  `TestMetalIdleWindow` adds 90 frames at 60 Hz that must release nothing,
+  then a release once they stop.
+- `gio/gpu/internal/metal`: the Go-memory stores of buffers of at most 4 KiB
+  (set through `set*Bytes`, used for every rebuilt path) are pooled by
+  power-of-two class, at most 256 per class, emptied by `Trim`. `set*Bytes`
+  copies them into the encoder, so a store is reusable once its buffer is
+  released. A 60 Hz Mirage session allocated megabytes of them a second.
+  `TestSmallBufferStoresReused` checks reuse, zeroing and that a small
+  immutable buffer costs one allocation (the `*Buffer`).
+- `gio/op/paint`, `gio/gpu`, `gio/internal/dirty`: `NewSharedImageOp(src,
+  mu)` is a mutable image whose owner writes pixels outside the frame. The
+  renderer takes `mu` only while it reads `src` (texture creation, or the
+  upload of changed areas once the version moved), during the frame. A
+  remote-desktop client can hand its decoder's framebuffer, cut into tiles
+  with `SubImage` and sharing one lock, instead of copying it into tile
+  images (about 60 MB for a 5K screen). `TestSharedImageReadsUnderLock`
+  checks every upload holds the lock, unchanged tiles never take it, and,
+  under `go test -race`, a concurrent writer.
+- `gio/app` (macOS): rechecked on 2026-10-18 whether two drawables would do
+  (16.7 MB each at 2560x1680): `TestMetalResizeWindow` stalled in 3 of 3
+  runs with `maximumDrawableCount = 2`, so it stays at three.
+
+## SVG parser
+
+`internal/oksvg` copies `github.com/srwiley/oksvg` at `v0.0.0-20221011165216-be6e8873101c` under BSD-3-Clause (`internal/oksvg/LICENSE`). It is an internal package of Keel's module, with no nested module or replace directive. Rasterization continues to use upstream `github.com/srwiley/rasterx`.
+
+Patch: `public.go` selects a local charset reader. Default builds accept UTF-8 and reject other declared encodings; `-tags keel_legacy_svg` uses the original `charset.NewReaderLabel`. This prevents legacy encoder/decoder tables and their initialization from entering every kit client. Rendering code is unchanged. Parser pixel comparisons against upstream and encoding tests live next to the copy. To update, copy upstream non-test Go files and LICENSE, then reapply this reader selection.
+
+### Selected Chroma lexer
+
+`ui/highlight/golang` copies the Go lexer and Go-template/plaintext XML rules from Chroma v2.27.0 (MIT, license included). Registration uses a private registry; Go HTML templates are omitted. This avoids linking hundreds of unrelated language rules into Components. The token adapter is shared with the unchanged full-language provider. Parity tests cover supported aliases, malformed code, Unicode, raw-string templates and styles.
+
+## Linux integration migrated from Mirage
+
+Added DMA-BUF registry and EGL external-image import with GPU-fenced lifetime, batched Wayland preedit and ordered IBus updates, X11 frameless hints and gestures, Wayland frameless decoration negotiation, and titlebar palette extensions. These changes belong to Keel rather than application-vendored copies. Regression tests accompany the surface lifetime, IME and X11 changes. No new cgo.
+
+## MyGo application patterns
+
+`ui/kit/app_shell.go` adapts the peer-page fade and retained-page approach from
+[MyGo ui/router.go](https://github.com/egoist/mygo/blob/96334a46826e59b2bf4ef9dff7321bd57b18927c/ui/router.go).
+`ui/motion/transition.go` uses the Smooth/Snappy/Bouncy preset parameters from
+`ui/motion.go` at that revision: 500ms with bounce 0, 0.15 and 0.3.
+Keel retains its own renderer and spring solver; no MyGo runtime is linked.
+Copyright (c) 2026 MyGo contributors. [MIT license](mygo/LICENSE).
+
+## Semantic bounds under transforms
+
+`gio/io/input` bounds transformed semantic areas by all four corners, so rotation, reflection and shear cannot invert or truncate accessibility and automation rectangles. `TestSemanticTransformedBounds` covers these transforms; element pose tests exercise nested transforms and pointer routing.
+
+## Terminal pointer events during command replay
+
+Retain unobserved pointer releases/cancellations when an earlier input event is pending replay. An animation invalidation or focus command could previously replay a press without its merged release, retaining pointer capture across a closing/reopening overlay. `gio/io/input/pointer_replay_test.go` exercises press-only receivers, command replay and a subsequent click elsewhere. This is a local Keel patch in the development branch, not an upstream or v0.4.2 fix.
+
+## Linear gradients under affine transforms
+
+`gio/gpu` maps gradient coordinates through the inverse paint transform. The
+previous texture-bounds mapping ignored scale and mishandled shear/rotation,
+so a scaled shared element changed colors at handoff. The mapping also handles
+coincident stops without NaNs. `gradient_transform_test.go` covers translation,
+nonuniform scaling, rotation and shear; the headless gradient test compares
+pixels at equivalent scales with a two-channel-level GPU rounding tolerance.
+Keel's shared gradient/shadow handoff test is byte-identical on the inspected
+Apple silicon host. This patch is local and is not part of v0.4.2.
+
+### Wayland desktop text scaling
+
+`gio/app/os_wayland.go` selects the text-scale schema by the active desktop: GNOME-family sessions use GNOME, Cinnamon uses Cinnamon, and other sessions fall back to 1. This avoids enlarging fonts alone on Hyprland due to unrelated GNOME preferences. Display/output scaling is unchanged. Desktop-source and scale-parsing tests cover the selection; no new cgo.
+
+### 2026-11-14: Wayland EGL swap interval
+
+Set the Wayland EGL swap interval only after binding its draw surface in `Lock`, for both native bindings. The previous constructor call could fail with `EGL_BAD_CONTEXT` and leave Mesa waiting for a frame callback inside `eglSwapBuffers`, blocking window events when hidden. `TestWaylandEGLCurrentSurface` exercises real Mesa state validation (`KEEL_DESKTOP=1` on Wayland).
+
+### Browser history ownership
+
+`gio/app` adds the opt-in `CustomBrowserHistory` window option. Browser apps with their own URL router must not get Gio's extra history sentinel or Back-key handler: that handler could perform a second `history.back()` after the app had already restored its route. The default is unchanged. Option tests live in `gio/app/browser_history_test.go`; `scripts/verify-gallery-web.cjs` exercises actual Chromium touch navigation, browser back and cross-category links. This is a local workspace patch.
+
+EmojiPicker catalog: Unicode 17.0 emoji-test.txt, generated by scripts/generate-emoji.py; source SHA256 1d8a944f88d7952f7ef7c5167fef3c67995bcae24543949710231b03a201acda. Unicode License V3 in unicode/LICENSE. Generation retains all fully-qualified sequences, groups uniform skin tones under their base, and keeps mixed-tone sequences independently selectable.
+
+### Unfocused input hints in large WASM handler tables
+
+`gio/io/input` now returns the remembered hint immediately when no handler has focus. Nil is not a valid handler tag. On the inspected Go 1.27.4 JS/WASM toolchain, querying a nil interface key in a sufficiently large map traps in `runtime.mapaccess2`; a standalone standard-library-only reproduction confirms this independently of Keel. Category previews with over a thousand handlers hit this lookup during `Window.updateState`. The resulting exception could surface later as `call to released function` in Chrome 157 or a Chromium 159 headless-shell renderer crash. This guard preserves focus/hint semantics and avoids that unnecessary lookup; it does not patch Go's map implementation. `TestInputHintWithoutFocusInLargeHandlerTable` verifies a 4,096-handler table, unchanged unfocused hints, focus changes and repeat notification suppression. Running the same test as JS/WASM fails without the guard and passes with it. Local workspace patch, not attributed to a released Keel version.
+
+### Nil logger in system font directory discovery
+
+`typesetting/fontscan.DefaultFontDirectories(nil)` now selects the same default logger as the other public fontscan entry points. Previously, a fontconfig parsing/warning path dereferenced nil; the existing mapped-system-font regression encountered this on Linux. `TestDefaultFontDirectoriesNilLoggerWithInvalidConfig` forces malformed fontconfig input and checks the call can return instead of panicking. No system configuration is changed by the test.
+
+### Font query-cache reference test
+
+`TestResolveFaceCachesMatchUncachedMap` retains two independently loaded font maps with the same query history, clearing the reference map's LRU, ASCII, query-hash and candidate caches before each resolution. The former test recreated the reference map for each query, changing its first-loaded last-resort face; this made unsupported script/rune combinations fail despite the documented arbitrary fallback. All queries, scripts, characters and repeated rounds remain checked. Production matching and fallback behavior are unchanged.
+
+### Shared EGL display lifetime
+
+`gio/internal/egl` counts live contexts per EGL display and serializes context creation/destruction. EGL's repeated `eglInitialize` calls do not create independent display lifetimes: terminating a display when one window closes invalidated its surviving peers. Only the last Keel context now calls `eglTerminate`; a failed first context cleans up its initialized display without terminating an existing peer's connection. No frame-path lock, polling or renderer change is added. `TestReleasingPeerPreservesEGLDisplay` reproduces `EGL_BAD_DISPLAY` before the fix, then draws and reads back the surviving window's pixels after closing its peer. The native scaling fixture also exercises scrolling and resizing; results are recorded separately from headless pixel tests.

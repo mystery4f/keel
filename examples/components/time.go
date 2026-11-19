@@ -1,0 +1,26 @@
+package main
+
+import (
+	"github.com/dyike/keel/ui/core"
+	"github.com/dyike/keel/ui/el"
+	"github.com/dyike/keel/ui/kit"
+	"time"
+)
+
+func init() {
+	registerSection("time", "foundations", func() core.Widget { return el.Embed(&timeGallery{}) })
+}
+
+type timeGallery struct {
+	visible bool
+	fired   int
+}
+
+func (v *timeGallery) Render(cx *el.Context) el.Element {
+	root := el.Div().Gap(16).Child(el.Div().OnClick(func() { v.visible = true }).P(8).Child(el.Text(demoText("Show a 3-second alert", "显示 3 秒提示"))), el.Div().OnClick(func() { v.visible = false }).P(8).Child(el.Text(demoText("Cancel early", "提前取消"))))
+	if v.visible {
+		cx.After("notice", 3*time.Second, func() { v.visible = false; v.fired++ })
+		root.Child(el.Div().ID("notice").Child(kit.Alert(demoText("Closing soon", "即将关闭")).Description(demoText("Canceling early removes the node and its timer", "提前取消会移除节点及其定时器")).Render(cx)))
+	}
+	return root
+}

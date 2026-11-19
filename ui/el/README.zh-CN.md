@@ -1,0 +1,48 @@
+# ui/el
+
+[English](README.md) | 简体中文
+
+GPUI 风格的元素与视图：视图是普通 struct，每帧 `Render` 返回一棵链式样式搭起来的元素树；flexbox 布局；元素状态（悬停、滚动、输入框内容）按元素路径或 ID 自动保存；Agent 语义自动生成。
+
+- **依赖**：`core`、`theme`、`locale`，以及内部的 `ui/internal/loop`、`ui/internal/editorstyle`、`ui/internal/inputcontent`, `ui/internal/animation`。不依赖 `kit`、`window`。
+- **被谁依赖**：应用代码。`window` 通过 `FillsWindow` 接口认出 `el.Root`，不引用本包。
+
+| 文件 | 内容 |
+| --- | --- |
+| `element.go` | `Element`、`Node`、`Styled[T]` 的全部链式方法，`Div`、`Text`、`Widget`、`Map`；`Decorate` 包裹绘制，`VisitWidgets` 读取布局后的部件坐标 |
+| `arena.go` | 每个 root 的节点块、可复用节点缓冲、独立指针句柄和构建代号校验；Cache 和独立元素使用持久存储 |
+| `reload.go` | `core.ReloadState`：在 `keel run` 重载间保留滚动位置和输入框文字，按树中位置、角色和名称匹配；从不保存密码 |
+| `time.go` | 帧时间、声明式定时器、显式 key 与减少动画 |
+| `overlay.go` | 声明式浮层、锚定定位、模态输入隔离、焦点约束与悬停查询 |
+| `mount.go` | `cx.Mount`：把视图挂到窗口根部（kit 的 `Dialog.Show`、`Sheet.Show`、`WindowNotifier` 用它） |
+| `key_context.go` | `KeyContext`、`cx.ActionAt`、`cx.Perform`（菜单和命令面板按动作名执行） |
+| `scrollbar.go`、`scrollbar_mode.go` | 滚动条绘制、显示策略（含跟随系统）与淡入淡出 |
+| `focus.go` | 原生焦点顺序、程序焦点、按键冒泡与默认激活、`FocusVisible` |
+| `input.go` | `Input`、`TextArea` |
+| `style.go` | `Style`、长度（`Dp`、`Frac`、`Full`）、对齐常量 |
+| `layout.go`、`flow.go` | flexbox、换行与简单网格布局 |
+| `paint.go` | 绘制、点击区域、滚动、输入框、语义信息 |
+| `text_measure.go` | 只计算文字尺寸，同帧复用测量结果；使用 Gio 排版，不生成绘制操作 |
+| `text_paint.go` | 短的单行数字标签复用矢量字形片段；复杂排版或字形重叠时回退到 Gio 标签 |
+| `text_atlas.go` | 按需启用数字标签图片缓存；绘制前准备可见标签，限制每帧存储，并检查绘制时的参数 |
+| `viewport.go` | 绘制坐标、可视区域与最近滚动容器的程序滚动 |
+| `state.go` | 元素状态存储与回收；触屏长按打开右键菜单 |
+| `root.go` | `View`、`ViewFunc`、`Context`、`Root`、`Embed`，每帧的执行顺序 |
+
+使用指南：[元素与视图](../../docs/el.zh-CN.md)。
+
+`input_paste.go` 在默认文本插入前处理 OnPaste；可接入 core.ClipboardReader，原生读取失败回退 Gio 纯文本通路。异步完成通过 core.Update，编辑内容或选区变化后丢弃旧结果。
+
+原子输入引用由 `el.InputDocument` 接入 `ui/internal/inputcontent`，后者只保存文本、引用范围、选区和编辑事务，不依赖 Gio 或其他 Keel 模块。kit 和 markdown 仅经 el 间接依赖它。
+
+可拖拽盒子支持父坐标轴移动、边界阻力、松手速度与吸附点，详见[拖拽与松手动画](../../docs/el.zh-CN.md#拖拽与松手动画)。
+
+文字内容过渡支持淡入淡出、数字滚动和完整塑形簇的重排，详见[文字内容变化](../../docs/el.zh-CN.md#文字内容变化)。
+
+SharedLayout 连接不同父容器中的前后两个元素，点击区域与锚定浮层同步移动。参见[共享元素](../../docs/el.zh-CN.md#跨父容器的共享元素)。
+
+共享布局加 `.Fly()` 后可越过祖先裁剪，仍绘制在后续浮层下方；Inert 退场状态仍禁止交互并隐藏语义。
+
+共享元素切换还会插值基础纯色、圆角、边框宽度和透明度。Text 同时声明 SharedLayout 与 ContentTransition 后，可跨父容器衔接文字，支持中途反向和字体变化。
+
+共享容器加 MatchText 后，按相对 ID/路径自动配对子文字。共享过渡也支持线性渐变和 Elevation 阴影插值。

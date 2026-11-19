@@ -1,0 +1,48 @@
+package kit
+
+import (
+	"fmt"
+	"reflect"
+	"strconv"
+
+	"github.com/dyike/keel/ui/el"
+	"github.com/dyike/keel/ui/theme"
+)
+
+// autoID gives a view a stable element ID for anchors, focus and hover
+// queries, unique within the process for as long as the view lives.
+func autoID(kind string, v any) string {
+	var scratch [96]byte
+	return string(appendAutoID(scratch[:0], kind, v))
+}
+
+func appendAutoID(dst []byte, kind string, v any) []byte {
+	value := reflect.ValueOf(v)
+	if value.Kind() != reflect.Pointer {
+		return fmt.Appendf(dst, "kit-%s-%p", kind, v)
+	}
+	dst = append(dst, "kit-"...)
+	dst = append(dst, kind...)
+	dst = append(dst, "-0x"...)
+	return strconv.AppendUint(dst, uint64(value.Pointer()), 16)
+}
+
+// surface is the panel of cards that sit in the page. Colors are read on
+// every call, so theme.Apply takes effect on the next frame.
+func surface() *el.DivEl {
+	return el.Div().Bg(theme.Surface).Border(1, theme.Outline).Rounded(theme.RadiusLg)
+}
+
+// floating is the panel of a layer above the page (menus, popovers,
+// dropdowns, dialogs): a surface lifted by a shadow, so it reads as on top.
+func floating(level theme.Elevation) *el.DivEl { return surface().Shadow(level) }
+
+// anchor wraps a trigger in a non-interactive box that layers can anchor to.
+// It adds no Tab stop and no click handler of its own.
+func anchor(id string, cx *el.Context, v el.View) *el.DivEl {
+	box := el.Div().ID(id).Items(el.Start)
+	if v != nil {
+		box.Child(v.Render(cx))
+	}
+	return box
+}

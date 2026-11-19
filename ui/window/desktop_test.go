@@ -1,0 +1,53 @@
+package window
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestRealWindows opens native windows in child processes, which own the main
+// thread. Set KEEL_DESKTOP=1 to run it.
+func TestRealWindows(t *testing.T) {
+	if os.Getenv("KEEL_DESKTOP") != "1" {
+		t.Skip("set KEEL_DESKTOP=1 to open real windows")
+	}
+	cases := [][]string{
+		{"./testdata/scaling"},
+		{"./testdata/pose"}, // transforms advance on paint-only frames and settle without redraws
+		{"./testdata/resident"},
+		{"./testdata/resident", "quit-open"},
+		{"./testdata/raise"},                   // Raise/Close from UI code must not deadlock
+		{"./testdata/reopen", "update", "now"}, // closing right after opening must not crash
+		{"./testdata/reopen", "locked", "now"},
+		{"./testdata/reopen", "update", "now", "raise"}, // Close cancels a Raise waiting for its first frame.
+	}
+	if runtime.GOOS == "darwin" {
+		cases = append(cases, []string{"./testdata/center"})
+		cases = append(cases, []string{"./testdata/chrome"})
+		cases = append(cases, []string{"./testdata/textcache"})
+		cases = append(cases, []string{"./testdata/minimized"}) // updates run while no window draws
+		cases = append(cases, []string{"./testdata/menuicons"})
+		if GlassSupported() {
+			cases = append(cases, []string{"./testdata/glass"})
+		}
+	}
+	if runtime.GOOS == "linux" && os.Getenv("KEEL_ATSPI") == "1" {
+		// Needs at-spi2-core in the session (dbus-run-session).
+		cases = append(cases, []string{"./testdata/atspi"})
+	}
+	for _, args := range cases {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			out, err := exec.CommandContext(ctx, "go", append([]string{"run"}, args...)...).CombinedOutput()
+			if err != nil || !strings.Contains(string(out), "PASS") {
+				t.Fatalf("%v\n%s", err, out)
+			}
+		})
+	}
+}

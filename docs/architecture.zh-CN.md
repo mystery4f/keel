@@ -1,0 +1,242 @@
+# 架构
+
+[English](architecture.md) | 简体中文
+
+Keel 的代码分两组：`ui/*` 负责界面，`native/*` 负责 Gio 做不到的系统能力。两组内部都按职责拆成小模块，每个模块一个目录、一个 README。界面建立在一条约定上：所有窗口的渲染和所有回调都在同一把锁下串行执行。
+
+## 模块
+
+```
+github.com/dyike/keel
+├── ui/
+│   ├── core/             地基：Widget 接口、回调、线程规则
+│   ├── theme/            颜色、字号、字体
+│   ├── locale/           框架自己显示的文字：确定、复制、关闭……
+│   ├── base/             无样式的组件行为：键盘导航、首字母跳转、多选
+│   ├── el/               GPUI 风格：视图、链式样式元素、flexbox
+│   ├── plot/             公共比例尺、图形布局与即时绘图
+│   ├── motion/           实验性的声明式动效基础能力
+│   ├── kit/              组件：Button、Input、Table、Dialog、Chart …（一个组件一个文件）
+│   ├── window/           窗口：Open、Main、快捷键、截图
+│   │   └── windowtest/   在内存中测试应用视图：按文字查找、点击、输入
+│   ├── markdown/         Markdown 渲染，针对 AI 流式输出
+│   ├── highlight/        可选：代码高亮（chroma），引入后 kit 和 markdown 才着色
+│   ├── netimage/         可选：http(s) 图片加载（net/http），引入后图片才能用网络地址
+│   └── internal/         loop（帧锁）、editorstyle（输入绘制）、inputcontent（原子引用编辑）、imageload（图片加载）、appkit（通过 purego 调 AppKit，供 window 用）、wayland（通过 purego 调 libwayland，供 window 用）、atspi（通过 D-Bus 调 AT-SPI，供 window 用）、uitest（测试工具）
+├── native/
+│   ├── permission/       权限检查与申请
+│   ├── screen/           显示器列表、截图
+│   ├── input/            合成鼠标、键盘事件
+│   ├── hotkey/           全局快捷键
+│   ├── notification/     系统通知（不依赖 UI）
+│   ├── tray/               托盘图标与原生菜单（不依赖 UI）
+│   ├── clipboard/        异步读取文本、编码图片和文件路径（不依赖 UI）
+│   ├── internal/sys/     平台绑定；macOS 通过 purego 调用 Objective-C，不用 cgo
+│   ├── internal/wlclip/  通过 purego 读取 Linux Wayland 剪贴板（只有 clipboard 引用）
+│   └── native.go         共用的错误值
+├── cmd/
+│   ├── keel/             脚手架：新建项目、运行、生成各平台图标并打包
+│   ├── gogio/            独立 Gio 打包命令，不需要 keel.json
+│   └── keel-mcp/         MCP server：Agent 用它对应用做端到端测试
+├── internal/
+│   ├── gogio/            keel 与 gogio 共用的 Gio 打包器，不导入 GUI
+│   ├── deps/             模块边界检查
+│   ├── oksvg/            内部 SVG 解析器；默认 UTF-8，可选旧字符集
+│   ├── svgicon/          把 SVG 图标画成 PNG（站点和脚手架共用）
+│   ├── appicon/          按 macOS、Windows、GNOME 规范裁出应用图标（脚手架和 ui/window 共用）
+│   └── site/             文档站生成器
+├── gio/                 Gio 基础库：窗口、布局、GPU；可依赖 typesetting
+├── typesetting/         go-text 基础库：字体与 shaping；不依赖 Gio
+├── third_party/         上游来源与补丁记录
+├── examples/
+└── docs/
+```
+
+每个模块目录下都有 README，写明它做什么、依赖谁、被谁依赖。
+
+### 依赖方向
+
+```
+ui:
+  kit ───────► el ──┐
+  kit ───────► base（组件行为，不依赖其他模块）
+  markdown ──► el   ├──► theme、locale
+  motion ────► el   │
+  plot ─────────────┤
+  window ───────────┤
+                    └──► core
+
+  theme、locale ──► internal/loop（切换主题或语言时通知所有窗口重绘）
+  el ──► internal/editorstyle（输入框绘制）
+  el ──► internal/inputcontent（原子引用内容与编辑事务）
+  markdown ──► internal/imageload（图片解码与占位）
+
+native:
+  permission ─┐
+  screen     ─┼──► internal/sys ──► native（错误值）
+  input      ─┤
+  hotkey     ─┘
+```
+
+规则只有三条：
+
+1. **依赖只往下走。** 下层不知道上层存在：`core` 只依赖内部帧锁，`theme` 仅引用内部帧循环以通知主题重绘；`el` 不知道有 `kit`；`window` 只认 `core.Widget` 接口，不知道具体有哪些组件。
+2. **同层之间不互相引用。** `kit`、`markdown` 和 `window` 互不引用；四个 `native` 模块互不引用。
+3. **`ui` 和 `native` 互不引用。** 不需要窗口的程序（后台截图、全局快捷键）只引用需要的 `native/*`，不会带进 Gio。
+
+`markdown` 用 `el` 排版，图片走 `internal/imageload`（加载、解码限制、占位）。`el` 的输入框用 `internal/editorstyle` 绘制光标和选区；这个内部包只负责 Gio 输入绘制和字形测量，不依赖其他 Keel 模块。
+
+`ui/window/windowtest` 位于 `window` 之上，只依赖它：它把 Agent 自动化同样使用的内存窗口 `window.OpenHeadless` 包装成应用的 Go 测试工具。
+
+`cmd/keel-mcp` 不引用任何 Keel 包，也不引用 Gio：它只通过 socket 上的 JSON 协议驱动 `ui/window` 的自动化模式，见 [Agent 端到端测试](automation.zh-CN.md#原理)。
+
+`cmd/gogio` 直接调用 `internal/gogio`，打包不含 `keel.json` 的应用，例如站点组件库。它与 `cmd/keel` 共用打包器，不导入 GUI 包。
+
+`cmd/keel` 不引用界面包：图标使用 `internal/svgicon` 和 `internal/appicon`，缩放与 Windows 资源使用 `golang.org/x/image` 和 `tc-hib/winres`，macOS、Android 和浏览器打包使用 `internal/gogio`。打包器调用 Go 与平台工具，按迁移后的 Gio 包前缀设置链接符号、识别权限、查找资源，不导入 Gio 或 Keel 的 UI/native 包。iOS 打包直接调用 Go 和 Xcode 工具，macOS 签名使用 `codesign`。见 [快速开始 · 打包](getting-started.zh-CN.md#打包)。
+
+Gio 和 go-text 是 Keel 根模块内的普通包，分别通过 `github.com/dyike/keel/gio/...` 和 `github.com/dyike/keel/typesetting/...` 导入。Gio 可依赖 typesetting，反向依赖禁止；两个基础库都不能导入其他 Keel 包。UI 可使用它们，native 和 CLI 必须不依赖它们。`gioui.org/shader` 保持独立外部模块。`internal/deps` 检查这些边界及传递依赖；应用 import 迁移见[单模块](single-module.zh-CN.md)。
+
+**体积大的依赖按需引入。** chroma（代码高亮）和 `net/http`（网络图片）各约 4 MB，不放在 kit、markdown、el、core、window 的依赖里：core 定义 `Highlighter` 和 `ImageFetcher` 两个接口，`ui/highlight` 和 `ui/netimage` 在 `init` 里注册实现，应用用到时引入。`internal/deps` 的 `TestHeavyDependenciesAreOptIn` 防止它们被重新拉进来。
+
+这些规则由 `internal/deps` 的测试强制执行：它把每个模块允许依赖的包写成一张表，越界或者新增目录没登记，`go test ./...` 就失败。改架构时先改那张表，再改代码。
+
+### 每层放什么
+
+| 模块 | 放什么 | 不放什么 |
+| --- | --- | --- |
+| `ui/core` | 所有界面模块都要遵守的接口和函数 | 任何具体组件、颜色 |
+| `ui/theme` | 视觉参数、全局调色板切换、局部主题作用域与重绘通知 | 组件 |
+| `ui/locale` | 框架自己显示或报告给 Agent 的文字，运行时切换语言 | 应用自己的文案、翻译系统 |
+| `ui/base` | 组件的行为：键盘导航、首字母跳转、多选、打开状态 | 任何绘制、颜色、Gio 以外的 Keel 依赖 |
+| `ui/plot` | 比例尺、堆叠/饼图布局、即时绘图基础件 | 成品图表、输入处理、窗口管理 |
+| `ui/motion` | 实验性的帧时间动画值、过渡和视觉变换 | 组件、窗口管理、原生定时器 |
+| `ui/kit` | 基于 el 和 base 的组件 | Gio 输入和浮层基础设施、窗口管理 |
+| `ui/window` | 与窗口绑定的东西：生命周期、快捷键、根视图、截图 | 具体组件 |
+| `ui/window/windowtest` | 基于 `window.OpenHeadless` 的 `testing.TB` 辅助，供应用测试 | 应用无法通过可见元素完成的操作 |
+| `ui/el` | 元素、样式、布局引擎、元素状态、视图 | 业务组件（它们在应用里写成函数或视图） |
+| `ui/internal/loop` | 跨窗口共享的可变状态：帧锁、更新队列 | 任何 Gio 类型 |
+| `ui/internal/appkit` | macOS：通过 purego 驱动 Objective-C 运行时（消息、自动释放池、主队列、block、类） | Keel 模块、Gio、cgo |
+| `ui/internal/wayland` | Linux：通过 purego 调用 libwayland-client（请求、私有队列、统一的事件分发） | Keel 模块、Gio、cgo |
+| `ui/internal/atspi` | Linux：通过 D-Bus 实现 AT-SPI 无障碍对象，供 window 使用 | 其他 Keel 模块、Gio |
+| `ui/internal/inputcontent` | 原子输入引用、字素边界、坐标映射与撤销事务 | Gio、其他 Keel 模块及平台事件 |
+| `ui/internal/editorstyle` | 输入框的光标、选区绘制和字形测量 | 具体 Keel 组件、窗口和主题 |
+| `ui/internal/imageload` | 图片来源解析、异步加载、尺寸限制、加载中和失败占位 | 组件外观、点击等交互 |
+| `gio` | Gio 窗口、布局、输入与 GPU 实现；typesetting 依赖 | Keel UI/native/CLI 包 |
+| `typesetting` | 字体解析、shaping 与栅格化 | Gio 或其他 Keel 包 |
+| `internal/oksvg` | kit 的 SVG 解析；可选旧字符集解码 | 其他 Keel 包、窗口或 GPU API |
+| `internal/gogio` | 打包命令、链接符号、平台资源 | GUI 导入或应用组件 |
+
+### 什么时候新建模块
+
+先看它是不是现有模块的职责。是，就在那个模块里加文件：新下拉框是 kit 组件，就是 `ui/kit/select.go`；新的布局能力（比如换行）属于 el，就是 `ui/el/layout.go` 里的改动。
+
+只有现有模块都装不下、而且它有自己清楚的职责时，才新建目录。例如剪贴板：不属于四个现有能力中的任何一个，也有只用它的场景，所以是新模块 `native/clipboard`。
+
+新建模块时，写 README，在上面的模块图和 `internal/deps` 的表里登记。
+
+## 一帧里发生了什么
+
+Gio 是即时模式框架：每一帧都从头调用一遍所有组件的 `Layout`，组件在 `Layout` 里处理自上一帧以来的输入事件，同时输出绘制指令。Keel 的组件对象只是保存状态（文本、勾选、输入框内容），不保存绘制结果。
+
+每个窗口有自己的 goroutine，收到 `FrameEvent` 后执行：
+
+```
+lockFrame()
+drainUpdates()               // 执行 core.Update 排队的函数
+window.handleShortcuts(gtx)  // 窗口快捷键
+root.Layout(gtx, content)    // 背景 + 滚动 + 24dp 内边距 + 组件树
+    └─ 各组件 Layout：处理事件 → 必要时 core.Call(回调) → 画自己
+unlockFrame()
+e.Frame(ops)                 // 提交给 GPU，在锁外执行
+```
+
+回调发生在布局中途，排在按钮前面的组件这一帧已经画完了，看到的是旧值。所以 `core.Call` 执行回调后会请求所有窗口再画一帧。实际效果是回调的修改晚一帧上屏，60Hz 屏幕上约 16ms，人眼察觉不到。
+
+每个 el root 持有自己的节点 arena，分配器只在帧锁内的 `Render` 期间生效；嵌套 root 返回或 panic 时恢复之前的分配器。下一次构建先让旧句柄过期，再复用节点槽位；回调也可能在同一帧触发第二次构建。`Context.Cache` 构建函数临时切换到持久存储。指针句柄本身不会被覆盖，旧指针无法获得后续构建的代号。复用前保存焦点祖先关系，让 Render 仍能查询上一轮声明。详见[元素生命周期](el.zh-CN.md#一帧里发生了什么)。
+
+## 线程规则
+
+**一句话：回调里直接改组件；其他 goroutine 改组件要包进 `core.Update`。**
+
+`ui/internal/loop` 里有一把全局帧锁。每个窗口画一帧时持有它，组件回调都发生在画帧过程中，所以回调执行时一定持有这把锁。组件本身不加锁，它们的并发安全全靠这把锁。
+
+| 代码在哪里运行 | 能否直接改组件 | 做法 |
+| --- | --- | --- |
+| 按钮、输入框、复选框的回调 | 能 | 直接改字段、调 `SetValue` 等 |
+| `window.Options.Shortcuts` 的回调 | 能 | 直接改 |
+| `window.Options.OnClose` | 能 | 直接改 |
+| 你启动的 goroutine、`time.AfterFunc` | 不能 | `core.Update(func() { ... })` |
+| `hotkey.Register` 的回调 | 不能 | `core.Update(func() { ... })` |
+| `main` 里 `window.Main()` 之前 | 能 | 窗口还没开始画，没有竞争 |
+
+`core.Update(fn)` 把 `fn` 放进队列并唤醒所有窗口；下一个开始画帧的窗口先执行队列，再布局。它在任何地方调用都安全，包括回调内部。
+
+后台任务的写法：
+
+```go
+kit.Button("刷新", func() {
+    v.status = "加载中…"
+    go func() {
+        data, err := fetch()           // 耗时操作在锁外
+        core.Update(func() {             // 结果回到界面
+            if err != nil {
+                v.status = err.Error()
+                return
+            }
+            v.status = data
+        })
+    }()
+})
+```
+
+这套模型的代价：
+
+- **所有窗口串行渲染。** 一个回调卡 2 秒，所有窗口都卡 2 秒。回调里只做改状态这类微秒级的事，I/O 和计算放 goroutine。
+- **`core.Update` 是异步的。** 调用返回时 `fn` 还没执行。在回调里等 `core.Update` 的结果（比如用 channel 等它执行完）会死锁：回调持有锁，`fn` 要等锁。
+- **还没有窗口时，队列不会被执行。** 程序开窗前 `core.Update` 的函数会在第一个窗口的第一帧执行。已打开但不画帧的窗口（最小化、被完全遮挡、锁屏）被 `core.Update` 唤醒时也会消费队列。驻留模式 `window.MainWithOptions(window.MainOptions{KeepAlive: true})` 使用事件唤醒的更新执行器，在同一个 frame lock 下消费队列，不依赖窗口绘制，也不轮询。
+
+为什么选一把大锁而不是给每个组件加锁，见[设计决策](decisions.zh-CN.md#一把全局帧锁)。
+
+## 不能在锁内等待主线程
+
+这是给维护 `ui/window` 和写组件的人的规则：**持有帧锁时，不能调用任何会等主线程执行完才返回的 Gio 窗口方法**。在 Gio 里就是 `Window.Perform`、`Window.Option`、`Window.Run`（窗口创建之后调用时）。
+
+原因是一个三方循环等待。以"设置窗口已打开，回到主窗口按 ⌘+,"为例：
+
+```
+主窗口 goroutine   持有帧锁，在快捷键回调里调 settings.Raise()
+                   └─ Gio Perform 等主线程执行它
+主线程             正在给设置窗口派发事件（焦点变了），等设置窗口画完这一帧
+设置窗口 goroutine  要画帧，等帧锁  ← 被主窗口 goroutine 持有
+```
+
+三方互相等待，界面卡死。这个 bug 真实出现过，`Raise`、`Close` 现在都用 `go w.win.Perform(...)` 放到锁外执行。`win.Invalidate()` 不等主线程，可以在锁内调用。
+
+新增窗口方法（设置位置、置顶、改标题）时照同样的办法处理，并在 `ui/window/testdata/raise` 这类真实窗口测试里覆盖，见[测试](testing.zh-CN.md#真实窗口测试)。
+
+## 窗口生命周期
+
+- `window.Open` 立即返回；原生窗口在它自己的 goroutine 里异步创建。
+- `Close`、`Raise` 会等窗口画出第一帧后才真正执行。Gio v0.10.3 在 macOS 上有个 bug：原生窗口还没建好就被关闭，进程会崩溃。人手点不了这么快，Agent 可以，所以 Keel 在这里等一下。回归测试是 `ui/window/testdata/reopen`。
+- 关闭窗口（用户点关闭，或调用 `w.Close()`）后，`OnClose` 在锁内执行，`w.Closed()` 变成 `true`。关闭的窗口不能重新打开，需要时重新 `window.Open`。
+- 默认最后一个窗口关闭后，进程调用 `os.Exit(0)` 退出。`KeepAlive` 模式继续驻留，使用 `window.Quit()` 显式退出。`Quit` 在 frame lock 下依次执行仍打开窗口的 `OnClose` 和应用的 `MainOptions.OnQuit`，各执行一次。`Main` 不返回，退出清理放在这些回调中。
+
+`native/notification` 仅依赖 `native` 和 `native/internal/sys`，通过异步完成回调返回权限/投递结果，不引用 UI 或 Gio。macOS 系统调用由主队列发起，Go 完成回调在独立 goroutine 执行；UI 回写使用 `core.Update`。kit.Notifier 通过公开 NoticeSystemBackend 接口接入，由应用层适配 native/notification，模块之间不直接引用。
+
+`ui/plot` 面向自定义图表，直接依赖 core 和 theme（主题字体），不依赖 kit、el 或 window；应用可将绘制嵌入 Widget。成品 Chart/Plot 保留在 kit，现有绘制实现尚未迁移到公共包。
+
+`native/clipboard` 依赖 native/internal/sys、native/internal/wlclip 与 native；wlclip 读取 Linux Wayland 剪贴板，运行时通过 purego 加载 libwayland-client，单独成包，只用截图、快捷键等模块的程序因此不会加载 libwayland。Wayland 连接由应用从 `window.Window.WaylandDisplay()` 取出交给 `clipboard.UseWaylandDisplay`，两组模块仍互不引用。macOS 在主队列读取剪贴板快照，再由后台 goroutine 交付。应用将结果适配为 core.ClipboardData，通过 Input/TextArea.PasteReader 接入；el 在 core.Update 后处理完成，不在帧锁内等待主线程。UI 模块没有新增 native 依赖。
+
+SVG 图标由 `internal/oksvg` 解析，在 `ui/kit` 内通过 `rasterx` 按物理像素栅格化，再通过 Gio 绘制。入口、格式子集和缓存上限见 [Icon](kit/icon.zh-CN.md)。
+
+`ui/kit` 通过本地 `internal/oksvg` 解析 SVG；该包只依赖外部光栅化包和标准库。SVG 默认使用 UTF-8。需要旧字符编码时，用 `-tags keel_legacy_svg` 构建以启用上游字符集解码表；此选项同时影响 SVG 图标和 SVG 图片。
+
+`native/process` 仅依赖 `native` 和 `native/internal/sys`，不引用 UI 或 Gio。终端前台进程组和进程工作目录的平台绑定位于 `native/internal/sys`，业务项目通过 Go API 调用。
+
+`native/tray` 仅依赖 `native` 和 `native/internal/sys`，不引用 UI 或 Gio。macOS 使用 purego/AppKit，Windows 使用 Win32，Linux 使用纯 Go 的 SNI/DBusMenu。原生事件进入独立的队列，由每个托盘的 Go goroutine 串行执行回调；写 UI 状态仍经过 `core.Update`。驻留策略由应用显式设置，创建托盘不会自动改变窗口生命周期。
+
+macOS、Windows 上的 `gio/app` 使用系统窗口装饰，不导入备用标题栏的 Material/文本依赖。Keel UI 组件仍按正常方式依赖文字和主题；其他目标保留 Gio 自绘标题栏回退。
+
+可选的 `ui/highlight/golang` 仅包含 Go、Go 文本模板和纯文本。两个高亮入口共用 `ui/internal/codehighlight` 转换 token。Components 使用 Go 高亮入口；图片演示均为本地内容或 data URL，无需引入 `ui/netimage`。
+
+`ui/internal/animation` 保存帧时间动画的数值采样器（弹簧、补间、关键帧、惯性），只依赖标准库。`ui/el` 和 `ui/motion` 共用它；元素动画状态、绘制变换和退出生命周期由 `ui/el` 管理，组件通过公开的 el API 使用，不反向导入 `ui/motion`。

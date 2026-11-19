@@ -1,0 +1,1313 @@
+package el
+
+import (
+	"image"
+	"image/color"
+	"math"
+	"strings"
+	"time"
+	"unicode"
+
+	"github.com/dyike/keel/gio/f32"
+	"github.com/dyike/keel/gio/io/key"
+
+	"github.com/dyike/keel/gio/font"
+	"github.com/dyike/keel/gio/gesture"
+	"github.com/dyike/keel/gio/io/event"
+	"github.com/dyike/keel/gio/io/pointer"
+	"github.com/dyike/keel/gio/io/semantic"
+	"github.com/dyike/keel/gio/layout"
+	"github.com/dyike/keel/gio/op"
+	"github.com/dyike/keel/gio/op/clip"
+	"github.com/dyike/keel/gio/op/paint"
+	"github.com/dyike/keel/gio/text"
+	"github.com/dyike/keel/gio/widget"
+	"github.com/dyike/keel/gio/widget/material"
+
+	"github.com/dyike/keel/ui/core"
+	"github.com/dyike/keel/ui/internal/inputcontent"
+	"github.com/dyike/keel/ui/internal/loop"
+	"github.com/dyike/keel/ui/theme"
+	"golang.org/x/image/math/fixed"
+)
+
+func (e *engine) label(n *Node, value string) material.LabelStyle {
+	ts := n.textStyle
+	lb := material.Label(theme.Material, ts.size, value)
+	lb.Color = ts.color.or(theme.Text)
+	lb.Font = textFont(ts)
+	if ts.align.set {
+		switch ts.align.value {
+		case Center:
+			lb.Alignment = text.Middle
+		case End:
+			lb.Alignment = text.End
+		}
+	}
+	if ts.lineHeight > 0 {
+		lb.LineHeightScale = ts.lineHeight
+	}
+	lb.MaxLines = ts.lines
+	return lb
+}
+
+// textFont is the font a text style draws with.
+func textFont(ts textStyle) font.Font {
+	f := font.Font{Typeface: theme.Material.Face}
+	if ts.mono.set && ts.mono.value {
+		f.Typeface = theme.MonoFace
+	}
+	if ts.weight.set {
+		f.Weight = ts.weight.value
+	}
+	if ts.italic.set && ts.italic.value {
+		f.Style = font.Italic
+	}
+	return f
+}
+
+func (e *engine) measureText(n *Node, maxW int) image.Point {
+	gtx := e.measureGtx(layout.Constraints{Max: image.Pt(min(maxW, inf), inf)})
+	return e.measureLabel(gtx, e.label(n, n.text)).Size
+}
+
+// measureInput: inputs fill the width they are given; their height is one
+// line, or about three for a TextArea unless AutoGrow is configured.
+func (e *engine) measureInput(n *Node, maxW int) image.Point {
+	// Empty text has a shorter line box and clips Latin descenders. Use the
+	// same stable mixed-script metrics as textShift, independent of input contents.
+	line := e.measureLabel(e.measureGtx(layout.Constraints{Max: image.Pt(inf, inf)}), e.label(n, "国Ag")).Size.Y
+	w := maxW
+	if w >= inf {
+		w = e.dp(200)
+	}
+	textW := w
+	if n.input.multiline {
+		st := e.store.get(n.key)
+		textW = max(1, w-inputScrollbarWidth(st.inputEditor(), true, e.dp(10)))
+	}
+	var objectState *elemState
+	if n.input.document != nil {
+		objectState = e.store.get(n.key)
+		e.prepareInputObjects(n, objectState, textW)
+		for _, dims := range objectState.inputObjects.sizes {
+			line = max(line, dims.Size.Y)
+		}
+	}
+	n.input.line = line
+	h := line
+	if n.input.multiline {
+		h = max(h, e.dp(72))
+		if spec := n.input; spec.minRows > 0 {
+			value := ""
+			if spec.document != nil {
+				value = spec.document.presentation().Text
+			} else if spec.bind != nil {
+				value = *spec.bind
+			} else if st := e.store.of(n); st != nil {
+				value = st.lastText
+			}
+			if spec.password {
+				value = strings.Map(func(r rune) rune {
+					if r == '\n' {
+						return r
+					}
+					return '•'
+				}, value)
+			}
+			// Match the font and line height passed to material.Editor at paint time.
+			lb := e.label(n, value)
+			if objectState != nil && objectState.inputObjects.shaper != nil {
+				th := *theme.Material
+				th.Shaper = objectState.inputObjects.shaper
+				lb = material.Label(&th, n.textStyle.size, value)
+				lb.Font = objectState.inputObjects.font
+				lb.LineHeightScale = n.textStyle.lineHeight
+			}
+			// One extra row: overflowing text then clamps to exactly maxRows
+			// rows, whatever the truncator's own line box would add.
+			lb.MaxLines = spec.maxRows + 1
+			measured := e.measureLabel(e.measureGtx(layout.Constraints{Max: image.Pt(textW, inf)}), lb).Size.Y
+			// Measure baseline spacing rather than multiplying glyph bounds:
+			// the first line and subsequent line advances need not match.
+			one := e.measureLabel(e.measureGtx(layout.Constraints{Max: image.Pt(inf, inf)}), e.label(n, "M")).Size.Y
+			two := e.measureLabel(e.measureGtx(layout.Constraints{Max: image.Pt(inf, inf)}), e.label(n, "M\nM")).Size.Y
+			advance := max(two-one, 1)
+			rowHeight := func(rows int) int { return one + min(rows-1, (inf-one)/advance)*advance }
+			minH, maxH := rowHeight(spec.minRows), rowHeight(spec.maxRows)
+			h = min(max(measured, minH), maxH)
+		}
+	}
+	return image.Pt(w, h)
+}
+
+// paint draws n and its descendants; offsets are relative to the parent.
+func (e *engine) paint(n *Node) {
+	if n.style.hidden {
+		return
+	}
+	gtx := e.gtx
+	// Skip what cannot be seen, e.g. the part of a long chat scrolled away.
+	// Absolute children may overflow their parent, so they are always painted.
+	pos := n.pos
+	if view := e.horizontalView; view != nil {
+		if n.style.pinX < 0 {
+			pos.X = view.Min.X + e.dp(n.style.pinOffset) - e.origin.X
+		}
+		if n.style.pinX > 0 {
+			pos.X = view.Max.X - e.dp(n.style.pinOffset) - n.size.X - e.origin.X
+		}
+	}
+	pos = pos.Add(image.Pt(e.dp(n.style.translate[0]), e.dp(n.style.translate[1])))
+	abs := image.Rectangle{Min: e.origin.Add(pos), Max: e.origin.Add(pos).Add(n.size)}
+	// A pose is sampled at paint time. Keep layout in its original coordinate
+	// space while Gio and the anchor map see the same composed transform.
+	var posed f32.Affine2D
+	var fade float32
+	var moving, sharedMoving bool
+	destinationVisible := abs.Overlaps(e.visible)
+	if n.pose != nil || n.dragMotion != nil {
+		target := f32.AffineId()
+		if n.pose != nil {
+			target = e.poseTransform(n, n.pose.target.values())
+		}
+		if st := e.store.of(n); st != nil && st.dragMotion != nil {
+			target = target.Offset(f32.Pt(st.dragMotion.target.X*e.dragScale(), st.dragMotion.target.Y*e.dragScale()))
+		}
+		target = target.Offset(f32.Pt(float32(abs.Min.X), float32(abs.Min.Y)))
+		destinationVisible = affineBounds(target, image.Rectangle{Max: n.size}).Overlaps(e.visible)
+	}
+	if n.hasVisualMotion() {
+		posed, fade, moving = e.sampleVisualMotion(n)
+		if n.sharedLayout != nil {
+			posed, sharedMoving = e.sampleSharedLayout(n, posed, abs.Min)
+			moving = moving || sharedMoving
+		}
+		if st := e.store.of(n); st != nil && st.dragMotion != nil {
+			st.dragMotion.toParent = posed.Offset(f32.Pt(float32(pos.X), float32(pos.Y)))
+		}
+		world, visible := e.poseWorld, e.visible
+		local := f32.AffineId().Offset(f32.Pt(float32(abs.Min.X), float32(abs.Min.Y))).Mul(posed)
+		local = local.Mul(f32.AffineId().Offset(f32.Pt(-float32(abs.Min.X), -float32(abs.Min.Y))))
+		e.poseWorld = world.Mul(local)
+		e.visible = affineBounds(local.Invert(), visible)
+		defer func() { e.poseWorld, e.visible = world, visible }()
+	}
+	if n.sharedFly && sharedMoving && e.frameSource.Enabled() {
+		e.queueFlight(n, abs.Min, fade)
+		return
+	}
+	// An animation may begin outside the clip and enter it later. Keep its
+	// clock alive when either its current or destination box can be seen.
+	if moving && gtx.Enabled() && (destinationVisible || abs.Overlaps(e.visible)) {
+		gtx.Execute(op.InvalidateCmd{})
+		if r := paintingRoot; r != nil {
+			r.motionDue = true
+		}
+	}
+	paintBounds := abs
+	if n.contentOverflow != nil {
+		paintBounds = paintBounds.Union(n.contentOverflow.Add(abs.Min))
+	}
+	if !n.style.absolute && !n.sharedSubtree && !paintBounds.Overlaps(e.visible) {
+		if loop.Accessibility() {
+			e.paintSemantics(n, pos)
+		}
+		return
+	}
+	if n.sharedLayout != nil && (destinationVisible || abs.Overlaps(e.visible)) {
+		e.markSharedLayout(n)
+	}
+	if n.id != "" && e.anchors != nil {
+		// A zero-size element anchors at its position: a notification
+		// corner, the point a context menu opens at.
+		if !abs.Intersect(e.visible).Empty() || abs.Empty() && abs.Min.In(e.visible) {
+			if _, found := e.anchors[n.id]; !found {
+				e.anchors[n.id] = affineBounds(e.poseWorld, abs)
+			}
+		}
+	}
+	saved := e.origin
+	e.origin = abs.Min
+	defer func() { e.origin = saved }()
+	defer op.Offset(pos).Push(gtx.Ops).Pop()
+	if n.hasVisualMotion() {
+		defer op.Affine(posed).Push(gtx.Ops).Pop()
+		if fade > 0 {
+			defer paint.PushOpacity(gtx.Ops, 1-fade).Pop()
+		}
+	}
+	if a := e.sharedOpacity(n); a < 1 {
+		defer paint.PushOpacity(gtx.Ops, a).Pop()
+	}
+	if n.inert {
+		prior := e.flightExitFade
+		opacity := e.sharedOpacity(n)
+		e.flightExitFade = 1 - (1-prior)*(1-fade)*opacity
+		defer func() { e.flightExitFade = prior }()
+	}
+	if n.decorate != nil {
+		g := gtx
+		g.Constraints = layout.Exact(n.size)
+		n.decorate(g, func() { e.paintContent(n) })
+	} else {
+		e.paintContent(n)
+	}
+}
+
+func (e *engine) paintContent(n *Node) {
+	if n.inert {
+		input, focus := e.blockInput, e.blockFocus
+		e.blockInput, e.blockFocus = true, true
+		defer func() { e.blockInput, e.blockFocus = input, focus }()
+		// Keep the semantic marker on its own enclosing clip. Descendant
+		// labels and roles cannot overwrite it; visual styles stay unchanged.
+		defer clip.Rect(e.visible.Sub(e.origin)).Push(e.gtx.Ops).Pop()
+		core.Role("el-inert").Add(e.gtx.Ops)
+	}
+	if n.palette != nil {
+		defer theme.Scope(*n.palette)()
+	}
+	savedGtx := e.gtx
+	if n.effectiveDisabled || e.blockInput {
+		e.gtx = e.gtx.Disabled()
+	}
+	defer func() { e.gtx = savedGtx }()
+	gtx := e.gtx
+	if n.style.revealSet {
+		savedVisible := e.visible
+		e.visible = e.visible.Intersect(image.Rectangle{Min: e.origin, Max: e.origin.Add(n.size)})
+		defer func() { e.visible = savedVisible }()
+		defer clip.Rect(image.Rectangle{Max: n.size}).Push(gtx.Ops).Pop()
+	}
+	st := e.sharedPaintStyle(n, n.style) // a copy: variants apply to this frame only
+	var callbackStyle *Style
+	var state *elemState
+	if n.id != "" || n.onPointerMove != nil || n.interactive() || n.onScroll != nil || (n.style.scrollY || n.style.scrollX) || n.input != nil {
+		state = e.store.get(n.key)
+	}
+	if gtx.Enabled() {
+		if n.onClick != nil || n.onDoubleClick != nil || n.hasDrag() || n.input != nil || n.widget != nil || n.style.scrollX || n.style.scrollY {
+			bounds := image.Rectangle{Min: e.origin, Max: e.origin.Add(n.size)}.Intersect(e.visible)
+			for _, scope := range e.dragScopes {
+				scope.drag.blocked = append(scope.drag.blocked, dragBlock{bounds, e.poseWorld.Invert().Mul(scope.toRoot)})
+			}
+		}
+		if state != nil && n.hasDrag() && n.dragPredicate() != nil {
+			state.conditionalDrag.blocked = state.conditionalDrag.blocked[:0]
+			e.dragScopes = append(e.dragScopes, dragScope{&state.conditionalDrag, e.poseWorld.Mul(f32.AffineId().Offset(f32.Pt(float32(e.origin.X), float32(e.origin.Y))))})
+			defer func() { e.dragScopes = e.dragScopes[:len(e.dragScopes)-1] }()
+		}
+	}
+	if state != nil && gtx.Enabled() {
+		state.enabledFrame = e.store.frame
+	}
+	if state != nil && n.interactive() && !n.effectiveDisabled && !e.blockInput {
+		if n.hover != nil && state.click.Hovered() {
+			st, callbackStyle = applyVisualStyle(n.hover, st, callbackStyle)
+		}
+		if n.active != nil && state.click.Pressed() {
+			st, callbackStyle = applyVisualStyle(n.active, st, callbackStyle)
+		}
+		if (n.hover != nil || n.active != nil) && gtx.Enabled() {
+			e.easeBackground(&st, state)
+		}
+	}
+	if n.isFocusable() && n.input == nil && gtx.Focused(state) && !state.pointerFocus {
+		st.borderWidth, st.borderColor = 2, theme.Primary
+		if n.focus != nil {
+			st, callbackStyle = applyVisualStyle(n.focus, st, callbackStyle)
+		}
+	}
+	if n.input != nil && (state.editor != nil && gtx.Focused(state.editor)) && state.inputRing {
+		if theme.Outline.A > 0 {
+			st.borderColor = theme.Primary
+		} else if st.bg.set && st.bg.value.A != 0 {
+			st.Bg(theme.SubtleHover)
+		}
+		if n.focus != nil {
+			st, callbackStyle = applyVisualStyle(n.focus, st, callbackStyle)
+		}
+	}
+	if n.effectiveDisabled {
+		// The disabled root picks the muted color, or its DisabledStyle
+		// does; descendants keep that choice instead of resetting it.
+		if n.disabledRoot || !e.paintTextColor.set {
+			st.text.color = some(theme.Muted)
+		} else {
+			st.text.color = e.paintTextColor
+		}
+		if n.disabledStyle != nil {
+			st, callbackStyle = applyVisualStyle(n.disabledStyle, st, callbackStyle)
+		}
+	}
+	if theme.Frameless {
+		st.borderWidth = 0
+		if !n.effectiveDisabled && ((n.isFocusable() && n.input == nil && gtx.Focused(state) && !state.pointerFocus) || (n.input != nil && (state.editor != nil && gtx.Focused(state.editor)) && state.inputRing)) {
+			bg := theme.Highlight
+			if st.bg.set && st.bg.value.A != 0 {
+				bg = st.bg.value
+				bg.R = uint8((4*uint16(bg.R) + uint16(theme.Muted.R)) / 5)
+				bg.G = uint8((4*uint16(bg.G) + uint16(theme.Muted.G)) / 5)
+				bg.B = uint8((4*uint16(bg.B) + uint16(theme.Muted.B)) / 5)
+			}
+			st.Bg(bg)
+			if n.focus != nil {
+				st, callbackStyle = applyVisualStyle(n.focus, st, callbackStyle)
+			}
+			st.borderWidth = 0
+		}
+	}
+	// Visual text-color variants inherit without changing measured text metrics.
+	if callbackStyle != nil {
+		*callbackStyle = st
+	}
+	savedColor, savedText := e.paintTextColor, n.textStyle
+	if st.text.color.set {
+		e.paintTextColor = st.text.color
+	}
+	if e.paintTextColor.set {
+		n.textStyle.color = e.paintTextColor
+	}
+	defer func() { e.paintTextColor = savedColor; n.textStyle = savedText }()
+
+	rect := image.Rectangle{Max: n.size}
+	radius := e.cornersOf(st, n.size)
+
+	// The shadow lies outside the element, so it goes down before the
+	// element's own clip.
+	if shadow, color, layers, ok := e.sharedShadow(n); ok {
+		e.paintShadow(shadow, color, layers, rect, radius)
+	}
+	// Elements that take input or report semantics get their own clip area;
+	// others do not, so their children can overflow them.
+	sem := hasSemantics(n)
+	if state != nil {
+		state.onPointerMove = n.onPointerMove
+	}
+	if state != nil && (n.id != "" || n.onPointerMove != nil) && !n.effectiveDisabled && !e.blockInput {
+		// Register above children so interactive descendants cannot hide hover.
+		defer func() {
+			hoverArea := clip.Rect(rect).Push(gtx.Ops)
+			kinds := pointer.Enter | pointer.Leave
+			if n.onPointerMove != nil {
+				kinds |= pointer.Move
+			}
+			gtx.Event(pointer.Filter{Target: &state.hoverTag, Kinds: kinds})
+			pass := pointer.PassOp{}.Push(gtx.Ops)
+			event.Op(gtx.Ops, &state.hoverTag)
+			pass.Pop()
+			hoverArea.Pop()
+		}()
+	}
+	if sem || state != nil && (n.interactive() || (n.style.scrollY || n.style.scrollX) || n.input != nil) {
+		defer radius.rrect(rect).Push(gtx.Ops).Pop()
+
+		if sem {
+			e.addSemantics(n)
+		} else if n.style.scrollY || n.style.scrollX {
+			core.Role("scrollarea").Add(gtx.Ops)
+		}
+		if state != nil && n.isFocusable() && n.input == nil && !e.blockFocus && !e.blockInput {
+			if gtx.Enabled() {
+				state.keyFrame = e.store.frame
+			}
+			// Register in paint order so Gio Tab order matches tree order.
+			gtx.Event(focusFilters(state)...)
+			event.Op(gtx.Ops, state)
+		}
+		if state != nil && n.interactive() && !n.effectiveDisabled && !e.blockInput {
+			if (state.fresh || e.paintOnly) && gtx.Enabled() {
+				// Gio drops areas whose handler asked for no events this
+				// frame. Paint-only frames skip dispatch and must renew the
+				// filters too (canRepaint already rejected pending input).
+				// dispatch asks on full frames; ask now so
+				// the element is clickable, and visible to agents, at once.
+				state.click.Update(gtx.Source)
+				if n.hasDrag() {
+					if n.dragPredicate() != nil {
+						state.conditionalDrag.update(gtx.Metric, gtx.Source, n.dragPredicate())
+					} else {
+						state.drag.Update(gtx.Metric, gtx.Source, gesture.Both)
+					}
+				}
+				state.fresh = false
+			}
+			if n.onContextMenu != nil {
+				// Observe above interactive descendants, passing events through.
+				defer func() {
+					area := clip.Rect(rect).Push(gtx.Ops)
+					gtx.Event(pointer.Filter{Target: &state.contextTag, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Cancel})
+					pass := pointer.PassOp{}.Push(gtx.Ops)
+					event.Op(gtx.Ops, &state.contextTag)
+					pass.Pop()
+					area.Pop()
+				}()
+			}
+			state.click.Add(gtx.Ops)
+			if n.hasDrag() {
+				if n.dragPredicate() != nil {
+					state.conditionalDrag.add(gtx.Ops)
+				} else {
+					state.drag.Add(gtx.Ops)
+				}
+			}
+			if gtx.Enabled() {
+				state.onClick, state.onDoubleClick, state.clickable = n.onClick, n.onDoubleClick, true
+				state.onDrag, state.size = n.onDrag, n.size
+			}
+			if st.cursor != pointer.CursorDefault {
+				st.cursor.Add(gtx.Ops)
+			}
+		}
+	}
+
+	if state != nil && n.onScroll != nil && !n.effectiveDisabled && !e.blockInput {
+		area := clip.Rect(rect).Push(gtx.Ops)
+		gtx.Event(n.onScroll.filter(&state.scrollTag, gtx.Metric))
+		event.Op(gtx.Ops, &state.scrollTag)
+		defer area.Pop()
+	}
+
+	// A press on the box that no child takes focuses its text: an input's own
+	// padding, or a field frame's blank space (FocusOnPress). Registered
+	// before the children, so the editor and any buttons stay on top.
+	if state != nil && (n.focusOnPress != "" || n.input != nil) && !n.effectiveDisabled && !e.blockInput {
+		area := clip.Rect(rect).Push(gtx.Ops)
+		event.Op(gtx.Ops, &state.pressTag)
+		pointer.CursorText.Add(gtx.Ops)
+		area.Pop()
+		if gtx.Enabled() {
+			// Ask now as well: Gio drops an area nobody asked events for.
+			gtx.Event(pointer.Filter{Target: &state.pressTag, Kinds: pointer.Press})
+			state.pressFocus, state.pressEditor, state.pressable = n.focusOnPress, n.input != nil, true
+		}
+	}
+	e.paintBox(st, rect, radius)
+	pl, pt, pr, pb := e.edges(st.pad)
+	bw := e.dp(n.style.borderWidth) // visual focus/hover borders never move content
+	inner := image.Rectangle{Min: image.Pt(bw+pl, bw+pt), Max: image.Pt(n.size.X-bw-pr, n.size.Y-bw-pb)}
+
+	switch {
+	case n.isText:
+		e.paintText(n, inner)
+	case n.input != nil:
+		saved := e.gtx
+		if e.blockFocus || n.effectiveDisabled {
+			e.gtx = e.gtx.Disabled()
+		}
+		if gtx.Enabled() {
+			state.keyFrame = e.store.frame
+		}
+		e.paintInput(n, state, inner)
+		e.gtx = saved
+	case n.widget != nil:
+		stk := op.Offset(inner.Min).Push(gtx.Ops)
+		g := gtx
+		if e.blockFocus || n.effectiveDisabled {
+			g = g.Disabled()
+		}
+		g.Constraints = layout.Exact(inner.Size())
+		// Embedded roots inherit the widget's content origin, including padding.
+		origin := e.origin
+		e.origin = e.origin.Add(inner.Min)
+		defer func() { e.origin = origin }()
+		if w, ok := n.widget.(core.ViewportWidget); ok {
+			w.LayoutViewport(g, e.visible.Sub(e.origin).Intersect(image.Rectangle{Max: inner.Size()}))
+		} else {
+			n.widget.Layout(g)
+		}
+		stk.Pop()
+	case st.scrollY || st.scrollX:
+		e.paintScroll(n, state, inner)
+	default:
+		e.paintChildren(n)
+	}
+}
+
+// Only a callback that actually runs needs an addressable, escaping Style.
+// Keep the common resting style on the stack. All callbacks on one paint use
+// the same private copy, as before; never recycle it for another node or frame.
+func applyVisualStyle(fn func(*Style), st Style, prior *Style) (Style, *Style) {
+	if prior == nil {
+		prior = new(Style)
+	}
+	*prior = st
+	fn(prior)
+	return *prior, prior
+}
+
+// hasSemantics reports whether n needs its own semantic clip node.
+func hasSemantics(n *Node) bool {
+	if n.isText && n.role == "" && n.name == "" && n.value == "" && !n.selected.set {
+		// Plain text: the Gio label reports itself, in an area padded to
+		// cover glyphs that reach past the line box. A clip of our own would
+		// cut those (the tails of g and y in tight fonts such as YaHei).
+		return false
+	}
+	return n.role != "" || n.onClick != nil || n.onDoubleClick != nil || n.name != "" || n.isText && n.text != "" || n.input != nil || n.selected.set
+}
+
+// addSemantics writes n directly into the current semantic clip. Keeping the
+// concrete op types avoids a temporary interface slice and its boxing.
+func (e *engine) addSemantics(n *Node) {
+	gtx := e.gtx
+	role := n.role
+	if role == "" && (n.onClick != nil || n.onDoubleClick != nil) {
+		role = "button"
+	}
+	switch role {
+	case "":
+	case "button":
+		semantic.Button.Add(gtx.Ops)
+		if n.value != "" {
+			core.Role("button", n.value).Add(gtx.Ops)
+		}
+	case "link", "tab", "columnheader", "select":
+		semantic.Button.Add(gtx.Ops)
+		core.Role(role, n.value).Add(gtx.Ops)
+	case "checkbox":
+		semantic.CheckBox.Add(gtx.Ops)
+		if n.value != "" {
+			core.Role("checkbox", n.value).Add(gtx.Ops) // e.g. mixed
+		}
+	case "radio":
+		semantic.RadioButton.Add(gtx.Ops)
+	case "switch":
+		semantic.Switch.Add(gtx.Ops)
+	default:
+		core.Role(role, n.value).Add(gtx.Ops)
+	}
+	name := n.name
+	if n.isText && name == "" {
+		name = n.text
+	}
+	if n.input != nil {
+		if name == "" {
+			name = n.input.placeholder
+		}
+		semantic.Editor.Add(gtx.Ops)
+	}
+	if name != "" {
+		semantic.LabelOp(name).Add(gtx.Ops)
+	}
+	if n.selected.set {
+		semantic.SelectedOp(n.selected.value).Add(gtx.Ops)
+	}
+	semantic.EnabledOp(!n.effectiveDisabled).Add(gtx.Ops)
+}
+
+// paintSemantics describes a node that is not painted because it is out of
+// view, and what is inside it, so screen readers can reach it: semantic
+// areas only, with no drawing and no input. Only while a platform
+// accessibility client reads the window (loop.Accessibility).
+func (e *engine) paintSemantics(n *Node, pos image.Point) {
+	if n.style.hidden || n.effectiveInert || n.widget != nil {
+		return
+	}
+	gtx := e.gtx
+	defer op.Offset(pos).Push(gtx.Ops).Pop()
+	if n.hasVisualMotion() {
+		m, _, _ := e.sampleVisualMotion(n)
+		defer op.Affine(m).Push(gtx.Ops).Pop()
+	}
+	scroll := n.style.scrollY || n.style.scrollX
+	if sem := hasSemantics(n); sem || scroll || n.isText && n.text != "" {
+		defer clip.Rect(image.Rectangle{Max: n.size}).Push(gtx.Ops).Pop()
+		switch {
+		case sem:
+			e.addSemantics(n)
+		case scroll:
+			core.Role("scrollarea").Add(gtx.Ops)
+		default:
+			semantic.LabelOp(n.text).Add(gtx.Ops)
+		}
+	}
+	if scroll {
+		if st := e.store.of(n); st != nil {
+			defer op.Offset(image.Pt(-st.scrollX, -st.scrollY)).Push(gtx.Ops).Pop()
+		}
+	}
+	for _, c := range n.children {
+		child := c.node()
+		e.paintSemantics(child, child.pos.Add(image.Pt(e.dp(child.style.translate[0]), e.dp(child.style.translate[1]))))
+	}
+}
+
+// corners are the radii in px of a box's corners: top left, top right,
+// bottom right, bottom left.
+type corners [4]int
+
+// cornersOf resolves a style's radius, or its separate corners, for a box of
+// size, never more than half the shorter side.
+func (e *engine) cornersOf(st Style, size image.Point) corners {
+	limit := min(size.X, size.Y) / 2
+	var c corners
+	for i := range c {
+		r := st.radius
+		if st.corners.set {
+			r = st.corners.value[i]
+		}
+		c[i] = min(e.dp(r), limit)
+	}
+	return c
+}
+
+func (c corners) rrect(rect image.Rectangle) clip.RRect {
+	return clip.RRect{Rect: rect, NW: c[0], NE: c[1], SE: c[2], SW: c[3]}
+}
+
+// inset is c for a box shrunk by d on every side.
+func (c corners) inset(d int) corners {
+	for i := range c {
+		c[i] = max(c[i]-d, 0)
+	}
+	return c
+}
+
+func (c corners) max() int { return max(c[0], c[1], c[2], c[3]) }
+
+func (e *engine) paintBox(st Style, rect image.Rectangle, radius corners) {
+	ops := e.gtx.Ops
+	if g := st.sharedGradient; g != nil {
+		gradientClip := radius.rrect(rect).Push(ops)
+		point := func(p f32.Point) f32.Point {
+			return f32.Pt(float32(rect.Min.X)+p.X*float32(rect.Dx()), float32(rect.Min.Y)+p.Y*float32(rect.Dy()))
+		}
+		paint.LinearGradientOp{Stop1: point(g.start), Stop2: point(g.end), Color1: g.from, Color2: g.to}.Add(ops)
+		paint.PaintOp{}.Add(ops)
+		gradientClip.Pop()
+	} else if g := st.gradient; g != nil {
+		paintGradient(ops, *g, rect, radius)
+	} else if st.bg.set {
+		paint.FillShape(ops, st.bg.value, radius.rrect(rect).Op(ops))
+	}
+	if bw := e.dp(st.borderWidth); bw > 0 {
+		// Stroke centered on a rectangle inset by half the width, so the
+		// border stays inside the element.
+		h := bw / 2
+		r := image.Rectangle{Min: rect.Min.Add(image.Pt(h, h)), Max: rect.Max.Sub(image.Pt(bw-h, bw-h))}
+		path := radius.inset(h).rrect(r).Path(ops)
+		if st.borderDashed {
+			path = dashedBorderPath(ops, r, float32(radius.inset(h).max()), float32(e.dp(4)), float32(e.dp(3)))
+		}
+		paint.FillShape(ops, st.borderColor, clip.Stroke{Path: path, Width: float32(bw)}.Op())
+	}
+}
+
+// paintShadow approximates a blurred shadow with rounded rectangles that grow
+// and fade: their translucent layers add up to theme.Shadow under the element
+// and thin out to nothing Blur dp beyond its edge.
+func (e *engine) paintShadow(sh theme.Elevation, color color.NRGBA, layers int, rect image.Rectangle, radius corners) {
+	ops := e.gtx.Ops
+	blur, offset := e.dp(sh.Blur), e.dp(sh.Offset)
+	if blur <= 0 || color.A == 0 {
+		return
+	}
+	if layers == 0 {
+		layers = min(max(blur/2, 3), 16)
+	}
+	c := color
+	c.A = uint8(max(1, int(color.A)/layers))
+	base := rect.Add(image.Pt(0, offset))
+	for i := 1; i <= layers; i++ {
+		grow := blur * i / layers
+		r := image.Rectangle{Min: base.Min.Sub(image.Pt(grow, grow)), Max: base.Max.Add(image.Pt(grow, grow))}
+		paint.FillShape(ops, c, radius.inset(-grow).rrect(r).Op(ops))
+	}
+}
+
+func (e *engine) paintText(n *Node, inner image.Rectangle) {
+	if n.content != nil && n.shimmer == nil && e.paintTextContent(n, inner) {
+		return
+	}
+	gtx := e.gtx
+	defer op.Offset(inner.Min.Add(image.Pt(0, e.textShift(n, scriptOf(n.text))))).Push(gtx.Ops).Pop()
+	g := gtx
+	g.Constraints = layout.Constraints{Max: inner.Size()}
+	if n.shimmer != nil {
+		e.paintShimmerText(n, g, inner.Size())
+	} else if len(n.textRanges) > 0 {
+		e.paintRangeText(n, g, inner.Size())
+	} else {
+		lb := e.label(n, n.text)
+		if !e.paintAtlasLabel(n, g, lb) {
+			e.paintLabel(g, lb)
+		}
+	}
+}
+
+func (e *engine) paintInput(n *Node, st *elemState, inner image.Rectangle) {
+	gtx := e.gtx
+	spec := n.input
+	ed := st.inputEditor()
+	if !st.edInit {
+		ed.SingleLine, ed.Submit = !spec.multiline, !spec.multiline
+		st.edInit = true
+	}
+	if spec.password {
+		ed.Mask = '•'
+	} else {
+		ed.Mask = 0
+	}
+	ed.MaxLen, ed.Filter, ed.ReadOnly = spec.maxLen, spec.filter, spec.readOnly
+	// A single-line box has no use for ↑ ↓ PageUp PageDown beyond jumping to
+	// its ends, so OnKey takes them before the editor sees them. Escape also
+	// reaches the handler for inline controls; modal layers handle it earlier.
+	// A multiline box keeps those keys for editing; it gives OnKey only the
+	// keys it captures, e.g. a plain Enter to send while Shift+Enter breaks
+	// the line. An input method composing text consumes Enter first.
+	if n.onKey != nil && (!spec.multiline || len(spec.captureKeys) > 0) && gtx.Enabled() {
+		var filters []event.Filter
+		if !spec.multiline {
+			filters = append(filters,
+				key.Filter{Focus: ed, Name: key.NameUpArrow}, key.Filter{Focus: ed, Name: key.NameDownArrow},
+				key.Filter{Focus: ed, Name: key.NamePageUp}, key.Filter{Focus: ed, Name: key.NamePageDown},
+				key.Filter{Focus: ed, Name: key.NameEscape})
+		}
+		for _, name := range spec.captureKeys {
+			if name != "" {
+				filters = append(filters, key.Filter{Focus: ed, Name: key.Name(name)})
+			}
+		}
+		for {
+			ev, ok := gtx.Event(filters...)
+			if !ok {
+				break
+			}
+			ke, ok := ev.(key.Event)
+			if !ok {
+				continue
+			}
+			state := KeyPress
+			if ke.State == key.Release {
+				state = KeyRelease
+			}
+			fn, e := n.onKey, KeyEvent{Name: string(ke.Name), Modifiers: ke.Modifiers, State: state}
+			core.Call(gtx, func() { fn(e) })
+		}
+	}
+	e.inputMenuActions(n, st)
+	if spec.document != nil {
+		e.inputDocumentEvents(n, st)
+	} else {
+		st.inputDocument = nil
+		e.inputPasteKeys(n, st)
+		e.inputUndoKeys(n, st)
+		// User edits first, then program changes to the bound string.
+		for {
+			beforeStart, beforeEnd := ed.Selection()
+			before := InputEdit{Text: st.lastText, Start: beforeStart, End: beforeEnd}
+			ev, ok := ed.Update(gtx)
+			if !ok && len(st.inputActions) > 0 {
+				action := st.inputActions[0]
+				st.inputActions = st.inputActions[1:]
+				ev, ok = e.inputAction(n, st, action)
+			}
+			if !ok {
+				ev, ok = e.inputPasteEvent(n, st)
+			}
+			if !ok {
+				break
+			}
+			switch ev.(type) {
+			case widget.ChangeEvent:
+				text := ed.Text()
+				if text == st.lastText {
+					break // SetText below, not the user
+				}
+				if spec.transform != nil || spec.transformEdit != nil {
+					start, end := ed.Selection()
+					normalized := InputEdit{Text: text, Start: start, End: end}
+					if spec.transformEdit != nil {
+						normalized = spec.transformEdit(before, normalized)
+					} else {
+						normalized = spec.transform(normalized)
+					}
+					if normalized.Text != text {
+						ed.SetText(normalized.Text)
+					}
+					if normalized.Text != text || normalized.Start != start || normalized.End != end {
+						ed.SetCaret(normalized.Start, normalized.End)
+					}
+					text = ed.Text()
+					if text == st.lastText {
+						break
+					}
+				}
+				st.inputUndo = append(st.inputUndo, before)
+				if len(st.inputUndo) > 100 {
+					st.inputUndo = st.inputUndo[1:]
+				}
+				st.inputRedo = nil
+				st.lastText = text
+				if spec.bind != nil {
+					*spec.bind = text
+				}
+				if spec.onChange != nil {
+					core.Call(gtx, func() { spec.onChange(text) })
+				}
+			case widget.SubmitEvent:
+				if spec.onSubmit != nil {
+					text := ed.Text()
+					core.Call(gtx, func() { spec.onSubmit(text) })
+				}
+			}
+		}
+		if spec.bind != nil && *spec.bind != st.lastText {
+			st.inputUndo, st.inputRedo = nil, nil
+			st.lastText = *spec.bind
+			ed.SetText(*spec.bind)
+		}
+	}
+	focused := gtx.Enabled() && gtx.Focused(ed)
+	if focused && !st.inputFocused {
+		if !st.inputSource {
+			st.inputRing = !e.store.recentPress()
+		}
+		st.inputSource = false
+	}
+	if focused && !st.inputFocused && spec.selectOnFocus {
+		ed.SetCaret(0, ed.Len())
+	}
+	st.inputFocused = focused
+	if selection := st.inputSelection; selection != nil {
+		if spec.document != nil {
+			d := spec.document
+			if r, err := inputcontent.ByteRange(d.Content().Text(), InputRange{Start: selection[0], End: selection[1]}); err == nil {
+				_ = d.session.SelectSource(r)
+				documentSyncEditor(st, d)
+			}
+		} else {
+			ed.SetCaret(selection[0], selection[1])
+		}
+		st.inputSelection = nil
+	}
+	// A single-line box taller than its line (theme.ControlHeight) centers
+	// the line, like a native field; the editor keeps the line's height.
+	line, textScript := spec.line, scriptMixed
+	if spec.password && ed.Len() > 0 {
+		textScript = scriptPassword
+		line = e.textLineBox(n, textScript)
+	}
+	if !spec.multiline && line > 0 && inner.Dy() > line {
+		inner.Min.Y += (inner.Dy() - line) / 2
+		inner.Max.Y = inner.Min.Y + line
+	}
+	defer op.Offset(inner.Min).Push(gtx.Ops).Pop()
+	g := gtx
+	barWidth := min(inner.Dx(), inputScrollbarWidth(ed, spec.multiline, e.dp(10)))
+	textSize := image.Pt(max(0, inner.Dx()-barWidth), inner.Dy())
+	track := image.Rect(textSize.X, 0, inner.Dx(), inner.Dy())
+	e.updateInputScrollbar(n, st, inner.Size(), track)
+	g.Constraints = layout.Exact(textSize)
+	ts := n.textStyle
+	th := theme.Material
+	shaper := theme.Material.Shaper
+	if spec.document != nil {
+		e.prepareInputObjects(n, st, textSize.X)
+		documentSyncEditor(st, spec.document)
+		if st.inputObjects.shaper != nil {
+			copy := *th
+			copy.Shaper = st.inputObjects.shaper
+			th = &copy
+			shaper = copy.Shaper
+		}
+	}
+	me := material.Editor(th, ed, spec.placeholder)
+	me.TextSize, me.Color, me.HintColor = ts.size, ts.color.or(theme.Text), theme.Muted
+	me.Font = textFont(ts)
+	if spec.document != nil && st.inputObjects.shaper != nil {
+		me.Font = st.inputObjects.font
+	}
+	me.LineHeightScale = ts.lineHeight
+	editorOffset := op.Offset(image.Pt(0, e.textShift(n, textScript))).Push(gtx.Ops)
+	if spec.document != nil {
+		st.caret.LayoutDecorated(g, me, shaper, func(g layout.Context) { e.paintInputTokens(n, st, g) })
+	} else {
+		st.caret.Layout(g, me, theme.Material.Shaper)
+	}
+	if spec.document != nil {
+		e.inputDocumentIME(n, st, g)
+	}
+	editorOffset.Pop()
+	e.paintInputScrollbar(n, st, inner.Size(), track)
+	// Keep the value in the semantic tree for agents.
+	value := ed.Text()
+	if spec.document != nil {
+		value = spec.document.Content().Text()
+	}
+	if spec.password {
+		value = strings.Repeat("•", ed.Len())
+	}
+	semantic.DescriptionOp(value).Add(gtx.Ops)
+}
+
+// paintScroll scrolls the padding box, like CSS: the padding scrolls with the
+// content, so the last child can scroll clear of the bottom padding.
+func (e *engine) paintScroll(n *Node, st *elemState, inner image.Rectangle) {
+	gtx := e.gtx
+	if !gtx.Enabled() {
+		copy := *st
+		st = &copy
+	}
+	previousX, previousY := st.scrollX, st.scrollY
+	previousRanges := [4]int{st.scrollViewX, st.scrollContentX, st.scrollView, st.scrollContent}
+	viewportHovered := st.scrollHover.Update(gtx.Source)
+	bw := e.dp(n.style.borderWidth)
+	pl, pt, pr, pb := e.edges(n.style.pad)
+	viewport := image.Rect(bw, bw, n.size.X-bw, n.size.Y-bw)
+	totalX := n.contentW + pl + pr
+	maxX := max(totalX-viewport.Dx(), 0)
+	if n.style.scrollX {
+		dx := st.scrollHorizontal.Update(gtx.Metric, gtx.Source, gtx.Now, gesture.Horizontal,
+			pointer.ScrollRange{Min: -st.scrollX, Max: maxX - st.scrollX}, pointer.ScrollRange{})
+		st.scrollX = min(max(st.scrollX+dx+st.scrollPendingX, 0), maxX)
+		st.scrollPendingX = 0
+		st.scrollMaxX, st.scrollViewX, st.scrollContentX, st.scrolledX = maxX, viewport.Dx(), totalX, true
+	} else {
+		st.scrollX = 0
+	}
+	total := n.contentH + pt + pb
+	maxScroll := max(total-viewport.Dy(), 0)
+	if n.style.scrollY {
+		// Stick: if the view was at the end last frame, it stays at the end.
+		atEnd := !st.scrolled || st.scrollY >= st.scrollMax-e.dp(2)
+		if n.style.stickBottom && atEnd || st.scrolled && n.style.endVersion != st.version {
+			st.scrollY = maxScroll
+		}
+		st.version = n.style.endVersion
+		if st.scrolled && n.style.keepVersion != st.keepVersion {
+			st.scrollY = max(maxScroll-(st.scrollMax-st.scrollY), 0) // same distance from the bottom as last frame
+		}
+		st.keepVersion = n.style.keepVersion
+		dist := st.scroll.Update(gtx.Metric, gtx.Source, gtx.Now, gesture.Vertical,
+			pointer.ScrollRange{}, pointer.ScrollRange{Min: -st.scrollY, Max: maxScroll - st.scrollY})
+		st.scrollY = min(max(st.scrollY+dist+st.scrollPending, 0), maxScroll)
+		st.scrollPending = 0
+		st.scrollMax, st.scrolled = maxScroll, true
+		st.scrollView, st.scrollContent = viewport.Dy(), total
+	} else {
+		st.scrollY = 0
+	}
+
+	barWidth := e.dp(10)
+	xTrack, yTrack := scrollbarTracks(viewport, e.cornersOf(n.style, n.size).inset(bw), barWidth,
+		n.style.scrollX && maxX > 0 && n.style.scrollY && maxScroll > 0)
+	if n.style.scrollX && n.style.controlledScroll == nil {
+		st.scrollX = st.scrollbarX.update(gtx, xTrack, true, st.scrollX, viewport.Dx(), totalX, e.dp(24), st)
+	}
+	if n.style.scrollY && n.style.controlledScroll == nil {
+		st.scrollY = st.scrollbarY.update(gtx, yTrack, false, st.scrollY, viewport.Dy(), total, e.dp(24), st)
+	}
+
+	if offset := n.style.controlledScroll; offset != nil {
+		if n.style.scrollX {
+			st.scrollX = min(max(e.dp(offset[0]), 0), maxX)
+		}
+		if n.style.scrollY {
+			st.scrollY = min(max(e.dp(offset[1]), 0), maxScroll)
+		}
+	}
+
+	rangesChanged := previousRanges != [4]int{st.scrollViewX, st.scrollContentX, st.scrollView, st.scrollContent}
+	if gtx.Enabled() && (st.scrollX != previousX || st.scrollY != previousY || rangesChanged && st.scrollObservedFrame == e.store.frame) {
+		// Render-time scroll readers also depend on viewport/content dimensions.
+		// Schedule only a changed observed range, never a resident polling frame.
+		gtx.Execute(op.InvalidateCmd{})
+	}
+
+	if st.scrollX != previousX || st.scrollY != previousY || st.scrollbarX.active || st.scrollbarY.active {
+		st.scrollVisibleUntil = gtx.Now.Add(ScrollbarLinger)
+	}
+	mode, showBars, alpha := st.scrollbarVisibility(gtx, n, viewportHovered, n.style.controlledScroll == nil)
+
+	// The viewport is its own area with the scroll handler, so it is a node
+	// in the semantic tree and agents only see what shows through it.
+	stk := clip.Rect(viewport).Push(gtx.Ops)
+	if n.style.scrollY && n.style.controlledScroll == nil {
+		st.scroll.Add(gtx.Ops)
+	}
+	if n.style.scrollX && n.style.controlledScroll == nil {
+		st.scrollHorizontal.Add(gtx.Ops)
+	}
+	off := op.Offset(image.Pt(-st.scrollX, -st.scrollY)).Push(gtx.Ops)
+	savedVis, savedOrigin := e.visible, e.origin
+	e.visible = e.visible.Intersect(viewport.Add(e.origin))
+	e.origin = e.origin.Add(image.Pt(-st.scrollX, -st.scrollY))
+	if n.style.scrollY {
+		st.scrollBounds = savedVis.Intersect(viewport.Add(savedOrigin)).Add(e.paintOffset)
+		e.scrollParents = append(e.scrollParents, st)
+	}
+	savedHorizontal := e.horizontalView
+	if n.style.scrollX {
+		view := viewport.Add(savedOrigin)
+		e.horizontalView = &view
+	}
+	e.paintChildren(n)
+	e.horizontalView = savedHorizontal
+	if n.style.scrollY {
+		e.scrollParents = e.scrollParents[:len(e.scrollParents)-1]
+	}
+	e.visible, e.origin = savedVis, savedOrigin
+	off.Pop()
+
+	if mode == ScrollbarHover && n.style.controlledScroll == nil {
+		pass := pointer.PassOp{}.Push(gtx.Ops)
+		st.scrollHover.Add(gtx.Ops)
+		pass.Pop()
+	}
+	if (alpha > 0 || showBars) && n.style.scrollY && n.style.controlledScroll == nil {
+		st.scrollbarY.paint(gtx, yTrack, false, st.scrollY, viewport.Dy(), total, e.dp(24), alpha, showBars)
+	}
+	if (alpha > 0 || showBars) && n.style.scrollX && n.style.controlledScroll == nil {
+		st.scrollbarX.paint(gtx, xTrack, true, st.scrollX, viewport.Dx(), totalX, e.dp(24), alpha, showBars)
+	}
+	stk.Pop()
+}
+
+// Paint pinned siblings last and clip ordinary siblings to the remaining lane.
+// Clipping affects both pixels and pointer/semantic operations.
+func (e *engine) paintChildren(n *Node) {
+	if e.horizontalView == nil {
+		for _, c := range n.children {
+			e.paint(c.node())
+		}
+		return
+	}
+	view := *e.horizontalView
+	left, right := view.Min.X, view.Max.X
+	pinned := false
+	for _, c := range n.children {
+		child := c.node()
+		if child.style.hidden {
+			continue
+		}
+		if child.style.pinX < 0 {
+			left = max(left, view.Min.X+e.dp(child.style.pinOffset)+child.size.X)
+			pinned = true
+		}
+		if child.style.pinX > 0 {
+			right = min(right, view.Max.X-e.dp(child.style.pinOffset)-child.size.X)
+			pinned = true
+		}
+	}
+	if !pinned {
+		for _, c := range n.children {
+			e.paint(c.node())
+		}
+		return
+	}
+	draw := func(child *Node, minX, maxX int) {
+		visible := e.visible
+		area := image.Rect(minX, visible.Min.Y, max(minX, maxX), visible.Max.Y).Intersect(visible)
+		if area.Empty() {
+			return
+		}
+		e.visible = area
+		stack := clip.Rect(area.Sub(e.origin)).Push(e.gtx.Ops)
+		e.paint(child)
+		stack.Pop()
+		e.visible = visible
+	}
+	for _, c := range n.children {
+		if c.node().style.pinX == 0 {
+			draw(c.node(), left, right)
+		}
+	}
+	for _, c := range n.children {
+		child := c.node()
+		if child.style.pinX < 0 {
+			draw(child, view.Min.X, min(left, view.Max.X))
+		}
+		if child.style.pinX > 0 {
+			draw(child, max(left, right), view.Max.X)
+		}
+	}
+}
+
+// shiftKey identifies a text style whose ink has been measured.
+type shiftKey struct {
+	face       font.Typeface
+	px         int
+	weight     font.Weight
+	lineHeight float32
+	script     script
+}
+
+// shifts caches textShift and the line box it was measured in, per text
+// style. Touched only under the frame lock.
+var shifts = map[shiftKey]textLine{}
+
+type textLine struct{ shift, box int }
+
+// script says which faces set a text, and so which line box it gets: East
+// Asian text usually comes from a fallback face (PingFang behind SF Pro) whose
+// ascent, descent and body differ from the Latin face's. Mixed text takes the
+// taller extent of both.
+type script uint8
+
+const (
+	scriptLatin script = iota
+	scriptWide
+	scriptMixed
+	scriptPassword
+)
+
+func scriptOf(s string) script {
+	var latin, wide bool
+	for _, r := range s {
+		switch {
+		case unicode.IsSpace(r):
+			// Spaces are set by the run around them.
+		case r >= 0x1100 && (unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul) ||
+			r >= 0x3000 && r <= 0x303f || r >= 0xff00 && r <= 0xffef):
+			wide = true
+		default:
+			latin = true
+		}
+	}
+	switch {
+	case wide && latin:
+		return scriptMixed
+	case wide:
+		return scriptWide
+	}
+	return scriptLatin
+}
+
+// textShift moves glyphs so their ink, not the font's line box, is centered
+// in the box, matching icons beside the text. Fonts differ: macOS PingFang
+// leaves a deep empty descent, so CJK text sits high; Windows YaHei fits its
+// ink tightly. The shift is measured in the line box of the faces that set
+// the text: Latin centers its cap height, East Asian text centers 国, and mixed
+// text centers both. One mixed measurement for all text set Latin labels low
+// and Chinese labels high beside their icons. The shift never pushes the
+// lowest or highest ink further out of the line box.
+func (e *engine) textShift(n *Node, sc script) int { return e.textLine(n, sc).shift }
+
+// textLineBox is the height of one line of n's text, which textShift centers
+// the ink in.
+func (e *engine) textLineBox(n *Node, sc script) int { return e.textLine(n, sc).box }
+
+func (e *engine) textLine(n *Node, sc script) textLine {
+	ts := n.textStyle
+	face := textFont(ts)
+	px := e.m.Sp(ts.size)
+	key := shiftKey{face.Typeface, px, face.Weight, ts.lineHeight, sc}
+	if l, ok := shifts[key]; ok {
+		return l
+	}
+	// The line box is what a Label of this style measures: Gio sizes a text
+	// box that way, and fallback fonts (国 in a Latin face) would otherwise
+	// skew metrics read from single glyphs.
+	// Bodies: A, 国, or both; g gives the lowest ink.
+	sample, body := "Ag", 1
+	switch sc {
+	case scriptWide:
+		sample = "国"
+	case scriptMixed:
+		sample, body = "国Ag", 2
+	case scriptPassword:
+		sample = "•"
+	}
+	lb := material.Label(theme.Material, ts.size, sample)
+	lb.Font = face
+	if ts.lineHeight > 0 {
+		lb.LineHeightScale = ts.lineHeight
+	}
+	dims := e.measureLabel(e.measureGtx(layout.Constraints{Max: image.Pt(inf, inf)}), lb)
+	boxDescent := dims.Baseline // below the baseline
+	boxAscent := dims.Size.Y - boxDescent
+	shaper := theme.Material.Shaper
+	shaper.LayoutString(text.Parameters{Font: face, PxPerEm: fixed.I(px), MaxWidth: 1 << 20}, sample)
+	bodyTop, bodyBottom, highest, lowest := 0, 0, 0, 0
+	found := false
+	for i := 0; ; i++ {
+		g, ok := shaper.NextGlyph()
+		if !ok {
+			break
+		}
+		if g.Bounds.Min.Y == g.Bounds.Max.Y {
+			continue
+		}
+		top, bottom := g.Bounds.Min.Y.Floor(), g.Bounds.Max.Y.Ceil()
+		highest, lowest = min(highest, top), max(lowest, bottom)
+		if i < body {
+			if !found {
+				bodyTop, bodyBottom, found = top, bottom, true
+			}
+			bodyTop, bodyBottom = min(bodyTop, top), max(bodyBottom, bottom)
+		}
+	}
+	shift := 0
+	if found {
+		// The line box runs from -boxAscent to +boxDescent around the baseline.
+		// Round halves down (positive): truncating, or rounding -0.5 away
+		// from zero, left CJK a visible half-pixel step high at 2x.
+		shift = int(math.Floor(float64((boxDescent-boxAscent)-(bodyTop+bodyBottom))/2 + 0.5))
+		shift = max(min(shift, max(boxDescent-lowest, 0)), min(-boxAscent-highest, 0))
+	}
+	l := textLine{shift, dims.Size.Y}
+	shifts[key] = l
+	return l
+}
+
+// paintGradient fills a rounded rectangle with g. The stops sit where the
+// gradient line, through the center at g.Angle, leaves the rectangle, so the
+// corners get the end colors whatever the angle.
+func paintGradient(ops *op.Ops, g theme.Gradient, rect image.Rectangle, radius corners) {
+	a := float64(g.Angle) * math.Pi / 180
+	dx, dy := math.Cos(a), math.Sin(a)
+	w, h := float64(rect.Dx()), float64(rect.Dy())
+	half := (math.Abs(w*dx) + math.Abs(h*dy)) / 2
+	cx, cy := float64(rect.Min.X)+w/2, float64(rect.Min.Y)+h/2
+	defer radius.rrect(rect).Push(ops).Pop()
+	paint.LinearGradientOp{
+		Stop1: f32.Pt(float32(cx-dx*half), float32(cy-dy*half)), Color1: g.From,
+		Stop2: f32.Pt(float32(cx+dx*half), float32(cy+dy*half)), Color2: g.To,
+	}.Add(ops)
+	paint.PaintOp{}.Add(ops)
+}
+
+// bgEase is how long a hover or press background takes to change.
+const bgEase = 120 * time.Millisecond
+
+// easeBackground fades an element's background between its resting, hover
+// and pressed colors instead of switching at once. Reduced motion switches.
+func (e *engine) easeBackground(st *Style, state *elemState) {
+	var target color.NRGBA
+	if st.bg.set {
+		target = st.bg.value
+	}
+	now := e.gtx.Now
+	if !state.bgInit || theme.ReducedMotion {
+		state.bgInit, state.bgShown, state.bgTo = true, target, target
+		return
+	}
+	if target != state.bgTo {
+		state.bgFrom, state.bgTo, state.bgStart = state.bgShown, target, now
+	}
+	t := float32(now.Sub(state.bgStart)) / float32(bgEase)
+	shown := target
+	if t < 1 {
+		shown = lerpColor(state.bgFrom, target, t)
+		e.gtx.Execute(op.InvalidateCmd{})
+	}
+	state.bgShown = shown
+	if shown.A != 0 || st.bg.set {
+		st.bg = some(shown)
+	}
+}
+
+// lerpColor blends two colors; a transparent end keeps the other's hue.
+func lerpColor(a, b color.NRGBA, t float32) color.NRGBA {
+	if a.A == 0 {
+		a.R, a.G, a.B = b.R, b.G, b.B
+	}
+	if b.A == 0 {
+		b.R, b.G, b.B = a.R, a.G, a.B
+	}
+	mix := func(x, y uint8) uint8 { return uint8(float32(x) + (float32(y)-float32(x))*t + 0.5) }
+	return color.NRGBA{R: mix(a.R, b.R), G: mix(a.G, b.G), B: mix(a.B, b.B), A: mix(a.A, b.A)}
+}

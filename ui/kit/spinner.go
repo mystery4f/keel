@@ -1,0 +1,94 @@
+package kit
+
+import (
+	"image/color"
+	"math"
+	"time"
+
+	"github.com/dyike/keel/gio/f32"
+	"github.com/dyike/keel/gio/op"
+	giowidget "github.com/dyike/keel/gio/widget"
+	"github.com/dyike/keel/gio/widget/material"
+	"github.com/dyike/keel/ui/core"
+	"github.com/dyike/keel/ui/el"
+	"github.com/dyike/keel/ui/locale"
+	"github.com/dyike/keel/ui/theme"
+)
+
+type SpinnerView struct {
+	size     float32
+	label    string
+	labelSet bool
+	icon     *giowidget.Icon
+	color    *color.NRGBA
+	period   time.Duration
+}
+
+// Spinner shows an indeterminate progress ring labelled with the locale's
+// Loading text until Label sets another one ("" hides the text).
+func Spinner() *SpinnerView { return &SpinnerView{size: 20} }
+func (v *SpinnerView) Size(dp float32) *SpinnerView {
+	if dp > 0 && !math.IsInf(float64(dp), 0) {
+		v.size = dp
+	}
+	return v
+}
+func (v *SpinnerView) Label(s string) *SpinnerView { v.label, v.labelSet = s, true; return v }
+
+// Icon replaces the ring with a rotating built-in icon. IconNone restores the ring.
+func (v *SpinnerView) Icon(name IconName) *SpinnerView { v.icon = Icon(name).icon; return v }
+
+// VectorIcon uses a custom decoded Gio icon; nil restores the ring.
+func (v *SpinnerView) VectorIcon(icon *giowidget.Icon) *SpinnerView { v.icon = icon; return v }
+
+// Color changes the graphic color, leaving the label in the theme's muted color.
+func (v *SpinnerView) Color(c color.NRGBA) *SpinnerView { v.color = &c; return v }
+
+// Period sets the duration of one rotation. Zero restores one second;
+// negative durations are ignored. Reduced motion always keeps the graphic still.
+func (v *SpinnerView) Period(d time.Duration) *SpinnerView {
+	if d >= 0 {
+		v.period = d
+	}
+	return v
+}
+func (v *SpinnerView) Render(cx *el.Context) el.Element {
+	label := v.label
+	if !v.labelSet {
+		label = locale.Current().Loading
+	}
+	c := theme.PrimaryText
+	if v.color != nil {
+		c = *v.color
+	}
+	ring := spinnerGraphic(cx, v.size, c, v.icon, v.period)
+	box := el.Div().Role("progressbar").Name(label).Value("indeterminate").Row().Items(el.Center).Gap(theme.SpaceMd).Child(ring)
+	if label != "" {
+		box.Child(el.Text(label).TextColor(theme.Muted))
+	}
+	return box
+}
+
+// spinnerRing is shared by Spinner and loading controls without adding semantics.
+func spinnerRing(cx *el.Context, size float32, c color.NRGBA) el.Element {
+	return spinnerGraphic(cx, size, c, nil, time.Second)
+}
+
+func spinnerGraphic(cx *el.Context, size float32, c color.NRGBA, icon *giowidget.Icon, period time.Duration) el.Element {
+	if period <= 0 {
+		period = time.Second
+	}
+	// The phase is read while painting, so frames that only turn the ring
+	// repaint without rendering the view again (el.AmbientPhase).
+	return el.Widget(core.Func(func(gtx core.C) core.D {
+		phase := el.AmbientPhase(gtx, period)
+		size := gtx.Constraints.Min
+		defer op.Affine(f32.Affine2D{}.Rotate(f32.Pt(float32(size.X)/2, float32(size.Y)/2), phase*2*math.Pi)).Push(gtx.Ops).Pop()
+		if icon != nil {
+			return icon.Layout(gtx, c)
+		}
+		p := material.ProgressCircle(theme.Material, .7)
+		p.Color = c
+		return p.Layout(gtx)
+	})).Size(el.Dp(size)).NoShrink()
+}
