@@ -3,6 +3,8 @@ package markdown
 import (
 	"bytes"
 	"github.com/dyike/keel/ui/el"
+	"github.com/dyike/keel/ui/locale"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -39,10 +41,9 @@ type block struct {
 	custom   el.View
 	kind     blockKind
 	anchor   string
-	level    int       // heading
-	spans    []span    // paragraph, heading
-	srcl     []spanSrc // where each span's Markdown sits; parallel to spans
-	lang     string    // codeBlock
+	level    int    // heading
+	spans    []span // paragraph, heading
+	lang     string // codeBlock
 	code     string
 	children []block // quote
 	ordered  bool    // list
@@ -232,13 +233,9 @@ func convertInner(n ast.Node, src []byte, base int, macros mathMacros, plugins .
 		}
 		return block{kind: paragraph, spans: []span{s}}, true
 	case *ast.Paragraph, *ast.TextBlock:
-		b := block{kind: paragraph}
-		b.spans, b.srcl = inlineSpans(n, src, base, span{}, macros, plugins...)
-		return b, true
+		return block{kind: paragraph, spans: inlines(n, src, span{}, macros, plugins...)}, true
 	case *ast.Heading:
-		b := block{kind: heading, level: n.Level}
-		b.spans, b.srcl = inlineSpans(n, src, base, span{}, macros, plugins...)
-		return b, true
+		return block{kind: heading, level: n.Level, spans: inlines(n, src, span{}, macros, plugins...)}, true
 	case *ast.FencedCodeBlock:
 		lang := ""
 		if n.Info != nil {
@@ -327,10 +324,128 @@ func tableOf(t *east.Table, src []byte, macros mathMacros, plugins ...*pluginSet
 
 // inlines flattens inline content into styled spans, merging neighbours with
 // the same style.
-// inlines renders an inline container without collecting source positions.
 func inlines(n ast.Node, src []byte, style span, macros mathMacros, plugins ...*pluginSet) []span {
-	spans, _ := inlineSpans(n, src, 0, style, macros, plugins...)
-	return spans
+	var out []span
+	add := func(s span) {
+		if s.text == "" {
+			return
+		}
+		if k := len(out) - 1; k >= 0 {
+			last := &out[k]
+			if last.object == nil && s.object == nil && last.imageURL == "" && s.imageURL == "" && last.anchor == "" && s.anchor == "" && last.superscript == s.superscript && last.subscript == s.subscript && last.underline == s.underline && last.mark == s.mark && last.math == nil && s.math == nil && last.bold == s.bold && last.italic == s.italic && last.code == s.code && last.strike == s.strike && last.link == s.link {
+				last.text += s.text
+				return
+			}
+		}
+		out = append(out, s)
+	}
+	var walk func(n ast.Node, st span)
+	walk = func(n ast.Node, st span) {
+		var tags htmlInline // inline HTML tags style their later siblings
+		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+			if object := customInline(plugins, c, src); object != nil {
+				s := st
+				s.text, s.object = object.Text, object
+				add(s)
+				continue
+			}
+			switch c := c.(type) {
+			case *east.FootnoteLink:
+				add(span{text: "[" + strconv.Itoa(c.Index) + "]", link: footnoteID(c.Index), anchor: footnoteRefID(c.Index, c.RefIndex), superscript: true})
+			case *east.FootnoteBacklink:
+				add(backlinkSpan(c))
+			case *mathInline:
+				s := st
+				s.text, s.math, s.display = c.raw, parseMathIn(c.source, macros), c.display
+				add(s)
+			case *ast.Text:
+				s := st
+				s.text = string(c.Segment.Value(src))
+				add(s)
+				switch {
+				case c.HardLineBreak():
+					add(span{text: "\n", bold: st.bold, italic: st.italic, link: st.link})
+				case c.SoftLineBreak():
+					// A soft break is a space, except between CJK characters.
+					if !endsCJK(s.text) {
+						b := st
+						b.text = " "
+						add(b)
+					}
+				}
+			case *ast.String:
+				s := st
+				s.text = string(c.Value)
+				add(s)
+			case *ast.CodeSpan:
+				s := st
+				s.code = true
+				var b strings.Builder
+				for t := c.FirstChild(); t != nil; t = t.NextSibling() {
+					if tt, ok := t.(*ast.Text); ok {
+						b.Write(tt.Segment.Value(src))
+					}
+				}
+				s.text = b.String()
+				add(s)
+			case *ast.Emphasis:
+				s := st
+				if c.Level >= 2 {
+					s.bold = true
+				} else {
+					s.italic = true
+				}
+				walk(c, s)
+			case *east.Strikethrough:
+				s := st
+				s.strike = true
+				walk(c, s)
+			case *ast.Link:
+				s := st
+				s.link = string(c.Destination)
+				walk(c, s)
+			case *ast.AutoLink:
+				s := st
+				s.link = string(c.URL(src))
+				s.text = string(c.Label(src))
+				add(s)
+			case *ast.Image:
+				s := st
+				s.imageURL = string(c.Destination)
+				var alt strings.Builder
+				ast.Walk(c, func(t ast.Node, entering bool) (ast.WalkStatus, error) {
+					if tt, ok := t.(*ast.Text); entering && ok {
+						alt.Write(tt.Segment.Value(src))
+					}
+					return ast.WalkContinue, nil
+				})
+				s.imageAlt = alt.String()
+				s.text = "[" + locale.Current().Name(locale.Current().Image, s.imageAlt) + "]"
+				add(s)
+			case *east.TaskCheckBox:
+				// drawn as the list marker instead
+			case *ast.RawHTML:
+				var raw strings.Builder
+				for i := 0; i < c.Segments.Len(); i++ {
+					seg := c.Segments.At(i)
+					raw.Write(seg.Value(src))
+				}
+				next, insert, ok := tags.tag(raw.String(), st)
+				if !ok { // not a known element, e.g. the <T> in List<T>
+					s := st
+					s.text = raw.String()
+					add(s)
+					continue
+				}
+				add(insert)
+				st = next
+			default:
+				walk(c, st)
+			}
+		}
+	}
+	walk(n, style)
+	return out
 }
 
 func endsCJK(s string) bool {

@@ -109,7 +109,7 @@ func (d *Doc) sourceOrderedBlocks() []bmg {
 			if k := b.kind; k == footnoteList || k == footnoteItem {
 				continue // drawn as an appendix, away from its source lines
 			}
-			list = append(list, bmg{kind: b.sourceKind(), open: b.open, srcStart: b.srcStart, srcEnd: b.srcEnd, srcInferred: b.srcInferred, spans: b.spans, srcl: b.srcl})
+			list = append(list, bmg{kind: b.sourceKind(), open: b.open, srcStart: b.srcStart, srcEnd: b.srcEnd, srcInferred: b.srcInferred})
 		}
 	}
 	sort.SliceStable(list, func(i, j int) bool { return list[i].srcStart < list[j].srcStart })
@@ -124,8 +124,6 @@ type bmg struct {
 	srcStart    int
 	srcEnd      int
 	srcInferred bool
-	spans       []span    // inline spans of a paragraph or heading
-	srcl        []spanSrc // where each span's Markdown sits
 }
 
 func (b block) sourceKind() string {
