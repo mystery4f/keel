@@ -53,6 +53,7 @@ type block struct {
 
 	srcStart, srcEnd int  // source bytes covered; zero when unknown
 	srcInferred      bool // span taken from the neighbours, not from goldmark
+	open             int  // first byte of the block's own source, markers included
 	view             any  // drawing state that must survive frames (rich text, copy feedback)
 }
 
@@ -121,7 +122,7 @@ func blocks(parent ast.Node, src []byte, base int, macros mathMacros, plugins ..
 		}
 		for j := i + 1; j < len(out); j++ {
 			if out[j].srcEnd > out[j].srcStart {
-				end = lineStartAt(src, out[j].srcStart-base)
+				end = out[j].open - base
 				break
 			}
 		}
@@ -168,6 +169,13 @@ func convert(n ast.Node, src []byte, base int, macros mathMacros, plugins ...*pl
 	}
 	if s, e := sourceSpan(n, b, base); e > s {
 		b.srcStart, b.srcEnd = s, e
+		b.open = base + lineStartAt(src, s-base)
+		// A fenced code block and a display math block begin one line above
+		// their content: the fence, the opening $$.
+		switch n.(type) {
+		case *ast.FencedCodeBlock, *displayMath:
+			b.open = base + lineStartAt(src, max(0, s-base-1))
+		}
 	}
 	return b, true
 }

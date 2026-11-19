@@ -162,3 +162,37 @@ func TestSourceRangesContextual(t *testing.T) {
 		t.Errorf("first range = %q", text)
 	}
 }
+
+// A fenced code block owns its fence lines and a display math block owns its
+// $$ lines, in both parsers: no other block may reach into them.
+func TestSourceRangesFencesAndMath(t *testing.T) {
+	full := "# h\n\n> q\n\n```go\nx\n```\n\n$$\nx = 1\n\ny = 2\n$$\n\n| a | b |\n| - | - |\n| 1 | 2 |\n"
+	// A link reference definition switches the document to the contextual
+	// parser, which splits it by node rather than by position.
+	contextual := strings.Replace(full, "\n\n| a | b |", "\n\n[a]: https://example.com\n\n| a | b |", 1)
+	for _, src := range []string{full, contextual} {
+		ranges := New(src).SourceRanges()
+		math := ""
+		for _, r := range ranges {
+			text := rangeText(src, r)
+			switch {
+			case strings.Contains(text, "```"):
+				if r.Kind != "code" {
+					t.Errorf("%s range holds a fence: %q", r.Kind, text)
+					continue
+				}
+				if !strings.HasPrefix(text, "```") || !strings.HasSuffix(strings.TrimSpace(text), "```") {
+					t.Errorf("code range = %q", text)
+				}
+			case r.Kind == "code":
+				t.Errorf("code range without a fence: %q", text)
+			}
+			if strings.Contains(text, "x = 1") {
+				math = text
+			}
+		}
+		if !strings.HasPrefix(math, "$$") || !strings.Contains(math, "y = 2\n$$") {
+			t.Errorf("math range = %q", math)
+		}
+	}
+}

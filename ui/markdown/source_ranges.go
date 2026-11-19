@@ -45,20 +45,15 @@ func (d *Doc) SourceRanges() []SourceRange {
 	src := d.src
 	docEnd := len(strings.TrimRight(src, "\n"))
 	type entry struct {
-		b   block
-		off int // the chunk's offset, or -1 when the chunk has no source
+		b block
 	}
 	var entries []entry
 	for _, c := range d.chunks {
-		off := -1
-		if c.src != "" {
-			off = c.off
-		}
 		for _, b := range c.blocks {
 			if k := b.kind; k == footnoteList || k == footnoteItem {
 				continue // drawn as an appendix, away from its source lines
 			}
-			entries = append(entries, entry{b: b, off: off})
+			entries = append(entries, entry{b: b})
 		}
 	}
 	// The contextual parser splits the document by node, not by position, so
@@ -67,13 +62,10 @@ func (d *Doc) SourceRanges() []SourceRange {
 	var out []SourceRange
 	prev := 0
 	for i, e := range entries {
-		// Goldmark keeps the content of a node, without its markers: an ATX
-		// heading starts after "# ", a list item after "- ". The line starts and
-		// the chunk edge carry the markers back in.
-		start := lineStartOf(src, e.b.srcStart)
-		if e.off >= 0 {
-			start = min(start, e.off)
-		}
+		// A block's own source begins at its open offset, which carries the
+		// markers: "# " for an ATX heading, the fence line above a fenced code
+		// block's first content line.
+		start := e.b.open
 		// Ranges tile the source in order and never overlap: text between two
 		// blocks belongs to the block above, and a block goldmark reports no
 		// lines for keeps the lines its neighbours left free.
@@ -85,10 +77,13 @@ func (d *Doc) SourceRanges() []SourceRange {
 			end = lineEndOf(src, e.b.srcEnd)
 		}
 		if i+1 < len(entries) {
-			next := entries[i+1]
-			bound := lineStartOf(src, next.b.srcStart)
-			if next.off >= 0 {
-				bound = min(bound, next.off) // the block's own markers start earlier
+			next := entries[i+1].b
+			// The next block's own source starts here, markers included, so the
+			// gap before it belongs to the block above. A block goldmark reports
+			// no lines for has no open offset: its content line is the boundary.
+			bound := next.open
+			if next.srcInferred {
+				bound = lineStartOf(src, next.srcStart)
 			}
 			end = max(end, bound)
 		} else {

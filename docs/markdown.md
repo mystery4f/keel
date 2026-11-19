@@ -237,6 +237,9 @@ reference definition, belongs to the block above it. A footnote list is drawn as
 an appendix away from its source lines, so it gets no range of its own: those
 lines stay with the block above.
 
+A fenced code block starts at its opening fence line and a display math block
+covers both `$$` lines, so a range can be parsed again on its own.
+
 The document parses in chunks cut at blank lines, so one range can hold several
 visual blocks (a list is one range, an HTML block is one `group`). Spans survive
 `Append` and frames; a chunk that only moved is shifted rather than reparsed.

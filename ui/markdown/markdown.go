@@ -178,6 +178,7 @@ func shiftSpans(bs []block, delta int) {
 		if bs[i].srcEnd > bs[i].srcStart {
 			bs[i].srcStart += delta
 			bs[i].srcEnd += delta
+			bs[i].open += delta
 		}
 		shiftSpans(bs[i].children, delta)
 		for _, it := range bs[i].items {
