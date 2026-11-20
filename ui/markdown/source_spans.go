@@ -1,6 +1,7 @@
 package markdown
 
 import (
+	"image"
 	"strings"
 	"unicode/utf8"
 
@@ -151,6 +152,18 @@ func spanKind(s span) string {
 		return "strike"
 	}
 	return "text"
+}
+
+// objectHit reports whether pt, relative to the text, falls inside an inline
+// object's piece. Presses there belong to the object's own widget, so the
+// selection ignores them: no caret, no drag, no focus claim.
+func (r *richText) objectHit(pt image.Point) bool {
+	for _, p := range r.pieces {
+		if p.run < len(r.runs) && r.runs[p.run].object != nil && pt.In(p.rect) {
+			return true
+		}
+	}
+	return false
 }
 
 // spanAt maps a rune index of the drawn text to the span drawn there.

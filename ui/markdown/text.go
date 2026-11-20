@@ -522,8 +522,10 @@ func (r *richText) updateSelection(gtx layout.Context) {
 			case pointer.Press:
 				if e.Buttons.Contain(pointer.ButtonPrimary) {
 					i := r.hit(pt)
-					r.sel, r.dragging = [2]int{i, i}, true
-					gtx.Execute(key.FocusCmd{Tag: r})
+					if !r.objectHit(pt) {
+						r.sel, r.dragging = [2]int{i, i}, true
+						gtx.Execute(key.FocusCmd{Tag: r})
+					}
 				}
 			case pointer.Drag:
 				if r.dragging {

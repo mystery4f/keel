@@ -293,4 +293,6 @@ doc.OnSpanClick(func(block, span int) {
 
 The block is an index into `SourceRanges`, the span an index into
 `SourceSpans(block)`. A click that drags a selection is not reported, so copying
-text still works.
+text still works. A press inside an inline object belongs to the object's own
+widget: the document selection ignores it and `OnSpanClick` stays silent, so a
+reader can click into an embedded input without disturbing the text around it.

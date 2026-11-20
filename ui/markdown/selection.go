@@ -170,6 +170,9 @@ func (s *documentSelection) update(gtx core.C, inputOrigin image.Point) {
 				s.lastScroll = time.Time{}
 				s.scrollCarry = 0
 				i := s.hit(pt)
+				if s.objectHit(pt) {
+					break // an inline object's own widget takes the press
+				}
 				rootPoint := pt.Add(s.origin)
 				delta := rootPoint.Sub(s.clickPoint)
 				elapsed := e.Time - s.clickAt
@@ -212,7 +215,7 @@ func (s *documentSelection) update(gtx core.C, inputOrigin image.Point) {
 					if s.dragged {
 						s.clicks = 0
 					} else if s.mode == 1 && s.sel[0] == s.sel[1] {
-						s.spanClick(s.sel[0])
+						s.spanClick(pt, s.sel[0])
 					}
 				}
 			case pointer.Cancel:
@@ -302,11 +305,25 @@ func (s *documentSelection) hit(pt image.Point) int {
 	return p.start + min(p.r.rt.hit(pt.Sub(p.rect.Min)), p.end-p.start)
 }
 
+// objectHit reports whether pt, in document coordinates, falls inside an
+// inline object's piece.
+func (s *documentSelection) objectHit(pt image.Point) bool {
+	for _, part := range s.parts {
+		if pt.In(part.visible) && part.r.rt.objectHit(pt.Sub(part.rect.Min)) {
+			return true
+		}
+	}
+	return false
+}
+
 // spanClick reports the inline span under a caret that a plain click placed.
-func (s *documentSelection) spanClick(i int) {
+func (s *documentSelection) spanClick(pt image.Point, i int) {
 	for _, part := range s.parts {
 		if i < part.start || i >= part.end || part.r.onSpan == nil {
 			continue
+		}
+		if part.r.rt.objectHit(pt.Sub(part.rect.Min)) {
+			return
 		}
 		if k, ok := part.r.rt.spanAt(i - part.start); ok {
 			part.r.onSpan(k)

@@ -279,4 +279,6 @@ doc.OnSpanClick(func(block, span int) {
 ```
 
 `block` 是 `SourceRanges` 的下标，`span` 是 `SourceSpans(block)` 的下标。拖动选
-区的点击不会上报，复制文字照旧可用。
+区的点击不会上报，复制文字照旧可用。落在行内对象内部的按压归对象自己的控件：
+文档选区不响应，`OnSpanClick` 也不上报，读者点进嵌入的输入框时不会惊动周围的
+文字。
