@@ -249,3 +249,48 @@ closed, so the last range can still move: read the ranges once streaming ends.
 The spans come from Goldmark's own line information, so a marker it does not
 treat as content (a setext heading's underline, a table's delimiter row) may
 extend a range beyond the text the block draws.
+
+## Inline spans
+
+`Doc.SourceSpans(i)` goes one level down: for the block at index `i` of
+`SourceRanges` it reports each drawn span and the Markdown it came from, in
+drawing order.
+
+```go
+ranges := doc.SourceRanges()
+for k, s := range doc.SourceSpans(3) {
+	fmt.Println(s.Kind, doc.Source()[s.Start:s.End], doc.SpanEditable(3, k))
+}
+```
+
+`Kind` is one of `text`, `emph`, `strong`, `strike`, `code`, `link`, `image`,
+`math`, `footnote-ref`, `html` or `object`. A span covers its own markup:
+`**bold**` rather than `bold`, and a link keeps `[label](target)`. Nested spans
+overlap: the emphasis in `*a **b** c*` covers the whole line while the strong
+span covers `**b**`.
+
+`Synthetic` marks a span drawn without a source range it can point at, such as a
+footnote marker; leave those alone. Only paragraphs and headings have inline
+spans — a code block, table, quote or list reports none, and an editor shows
+those whole.
+
+`SpanEditable(i, k)` reports whether span `k` can be handed to a widget of its
+own: its Markdown, parsed again with the document's link and footnote
+definitions, must render to the same text. Spans crossing a line, synthetic
+spans and whitespace are not editable.
+
+`OnSpanClick` reports which span a reader clicked, for an editor that swaps one
+span for an input:
+
+```go
+doc.OnSpanClick(func(block, span int) {
+	if doc.SpanEditable(block, span) {
+		start := doc.SourceRanges()[block].Start
+		fmt.Println(doc.SourceSpans(block)[span].Kind, start)
+	}
+})
+```
+
+The block is an index into `SourceRanges`, the span an index into
+`SourceSpans(block)`. A click that drags a selection is not reported, so copying
+text still works.

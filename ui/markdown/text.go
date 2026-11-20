@@ -124,6 +124,9 @@ type richText struct {
 	document       *documentSelection
 	decoration     bool
 	offset, length int // rune range in the document, excluding decorations
+
+	// srcl is parallel to runs: where each drawn span's Markdown sits.
+	srcl []spanSrc
 }
 
 func (r *richText) link(i int) *gesture.Click {

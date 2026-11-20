@@ -211,6 +211,8 @@ func (s *documentSelection) update(gtx core.C, inputOrigin image.Point) {
 					s.dragging = false
 					if s.dragged {
 						s.clicks = 0
+					} else if s.mode == 1 && s.sel[0] == s.sel[1] {
+						s.spanClick(s.sel[0])
 					}
 				}
 			case pointer.Cancel:
@@ -298,6 +300,19 @@ func (s *documentSelection) hit(pt image.Point) int {
 	}
 	p := s.parts[nearest]
 	return p.start + min(p.r.rt.hit(pt.Sub(p.rect.Min)), p.end-p.start)
+}
+
+// spanClick reports the inline span under a caret that a plain click placed.
+func (s *documentSelection) spanClick(i int) {
+	for _, part := range s.parts {
+		if i < part.start || i >= part.end || part.r.onSpan == nil {
+			continue
+		}
+		if k, ok := part.r.rt.spanAt(i - part.start); ok {
+			part.r.onSpan(k)
+		}
+		return
+	}
 }
 
 // Recompute endpoints in content coordinates even when only the viewport
