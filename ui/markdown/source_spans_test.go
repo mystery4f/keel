@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dyike/keel/gio/f32"
 	"github.com/dyike/keel/ui/el"
 	"github.com/dyike/keel/ui/internal/uitest"
 )
@@ -214,5 +215,31 @@ func TestOnSpanClickReportsSpan(t *testing.T) {
 	}
 	if !d.SpanEditable(block, span) {
 		t.Error("the clicked span should be editable")
+	}
+}
+
+// A point on a rendered character reports the source byte of that character,
+// and a point off the text reports nothing.
+func TestSourceAtIndexesSourceBytes(t *testing.T) {
+	const src = "第一段普通文字。\n\n第二段**加粗**结尾。\n"
+	d := New(src)
+	h := uitest.New(el.Root(docView{d}))
+	// Rune 3 of the drawn second paragraph is the 粗 inside the bold span;
+	// its left half keeps the caret before that character.
+	x, y := textPoint(t, h, d, "第二段加粗结尾。", 3)
+	block, offset, ok := d.SourceAt(f32.Pt(x, y))
+	if !ok {
+		t.Fatal("a point on drawn text reported no source offset")
+	}
+	r := d.SourceRanges()[block]
+	if got := rangeText(src, r); !strings.Contains(got, "第二段") {
+		t.Fatalf("point on the second paragraph reported block %q", got)
+	}
+	if got := src[r.Start+offset:]; !strings.HasPrefix(got, "粗**结尾") {
+		t.Fatalf("point on 粗 reported %q", got)
+	}
+	// 11px is the document view's padding; 1000 is below every block.
+	if _, _, ok := d.SourceAt(f32.Pt(x, 1000)); ok {
+		t.Error("a point below the text reported a source offset")
 	}
 }

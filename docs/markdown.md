@@ -296,3 +296,10 @@ The block is an index into `SourceRanges`, the span an index into
 text still works. A press inside an inline object belongs to the object's own
 widget: the document selection ignores it and `OnSpanClick` stays silent, so a
 reader can click into an embedded input without disturbing the text around it.
+`Doc.SourceAt(pt)` goes the other way: from a point in the document's own
+coordinate system (the origin sits at the document's top left corner, text
+outside the viewport keeps its position) it reports `(block, offset, ok)` —
+the block of `SourceRanges` the point falls in and the byte offset inside it,
+so `doc.Source()[doc.SourceRanges()[block].Start+offset:]` starts at the
+character a caret placed at `pt` would sit before. Points off the drawn text,
+and presses over an inline object, report `ok == false`.

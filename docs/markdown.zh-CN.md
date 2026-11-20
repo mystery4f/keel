@@ -282,3 +282,8 @@ doc.OnSpanClick(func(block, span int) {
 区的点击不会上报，复制文字照旧可用。落在行内对象内部的按压归对象自己的控件：
 文档选区不响应，`OnSpanClick` 也不上报，读者点进嵌入的输入框时不会惊动周围的
 文字。
+`Doc.SourceAt(pt)` 反过来走：给定文档自身坐标系里的一个点（原点在文档左上角，
+视口外的文字保持自己的位置），返回 `(block, offset, ok)` —— 该点所在 `SourceRanges`
+块的序号与块内字节偏移，于是 `doc.Source()[doc.SourceRanges()[block].Start+offset:]`
+从「把光标放在 `pt` 时它前面那个字符」开始。落在绘制文字之外的点，以及按在行内
+对象上的按压，返回 `ok == false`。

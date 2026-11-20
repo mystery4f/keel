@@ -2,9 +2,11 @@ package markdown
 
 import (
 	"image"
+	"math"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/dyike/keel/gio/f32"
 	"github.com/yuin/goldmark/ast"
 	gmparser "github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
@@ -177,4 +179,94 @@ func (r *richText) spanAt(i int) (int, bool) {
 		pos += n
 	}
 	return 0, false
+}
+
+// SourceAt maps a point to the source byte of the character drawn there.
+// pt is in the document's own coordinate system, the one documentSelection
+// uses: the document's top left corner is the origin, text outside the
+// viewport keeps its position. block indexes SourceRanges and offset is the
+// byte inside that range, so
+//
+//	Doc.Source()[Doc.SourceRanges()[block].Start+offset:]
+//
+// starts at the character a caret placed at pt would sit before.
+//
+// Points outside the drawn text of a block, and points over an inline
+// object's own widget, report ok false: those presses belong to something
+// else.
+func (d *Doc) SourceAt(pt f32.Point) (block, offset int, ok bool) {
+	p := image.Pt(int(math.Round(float64(pt.X))), int(math.Round(float64(pt.Y))))
+	for i := range d.selection.parts {
+		part := &d.selection.parts[i]
+		if !p.In(part.visible) {
+			continue
+		}
+		local := p.Sub(part.rect.Min)
+		if part.r.rt.objectHit(local) {
+			return 0, 0, false
+		}
+		src, traced := part.r.rt.srcAt(d.src, part.r.rt.hit(local))
+		if !traced {
+			return 0, 0, false
+		}
+		ranges := d.SourceRanges()
+		for j := range ranges {
+			r := &ranges[j]
+			last := j == len(ranges)-1
+			if src >= r.Start && (src < r.End || last && src == r.End) {
+				return j, src - r.Start, true
+			}
+		}
+		return 0, 0, false
+	}
+	return 0, 0, false
+}
+
+// srcAt maps a rune index of the drawn text to its source byte. Untraced
+// spans — footnote markers, objects drawn without source — report false.
+func (r *richText) srcAt(src string, i int) (int, bool) {
+	if i < 0 || r.textRuns == 0 {
+		return 0, false
+	}
+	pos := 0
+	for k := 0; k < r.textRuns && k < len(r.runs); k++ {
+		text := r.runs[k].text
+		n := utf8.RuneCountInString(text)
+		if i <= pos+n {
+			s := spanSrc{}
+			if k < len(r.srcl) {
+				s = r.srcl[k]
+			}
+			if s.synthetic || s.start > s.end || s.end > len(src) {
+				return 0, false
+			}
+			// A span's range covers the markers of the container that opened
+			// it, so the drawn text starts inside the range, not at its edge.
+			base := s.start
+			if off := strings.Index(src[base:s.end], text); off >= 0 {
+				base += off
+			}
+			return base + runeBytes(text, i-pos), true
+		}
+		pos += n
+	}
+	// Past the last rune: the end of the last span that came from source.
+	for k := min(r.textRuns, len(r.srcl)) - 1; k >= 0; k-- {
+		if !r.srcl[k].synthetic {
+			return r.srcl[k].end, true
+		}
+	}
+	return 0, false
+}
+
+// runeBytes returns the byte count of the first n runes of s.
+func runeBytes(s string, n int) int {
+	count := 0
+	for i := range s {
+		if count == n {
+			return i
+		}
+		count++
+	}
+	return len(s)
 }
